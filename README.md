@@ -34,21 +34,18 @@ pixi install
 pixi run paperman --help
 ```
 
-### 方式二：pip
+### 方式二：GitHub Release 下载（推荐，无需环境）
+
+从 [Releases 页面](https://github.com/laq12345/paperman/releases) 下载预编译二进制：
 
 ```bash
-pip install paperman
-paperman --help
+# 下载最新版
+curl -L https://github.com/laq12345/paperman/releases/download/v0.0.0/paperman -o paperman
+chmod +x paperman
+./paperman --help
 ```
 
-### 方式三：Nuitka 单文件二进制
-
-```bash
-pixi run nuitka --standalone --onefile -o paperman src/paperman/cli.py
-./dist/paperman --help
-```
-
-> 二进制约 50MB，包含 Python 解释器和全部依赖，无需 Python 环境即可运行。
+> 二进制约 50MB，包含 Python 解释器和全部依赖，无需 Python 环境即可运行。仅适用于 Linux x86_64。
 
 ---
 
