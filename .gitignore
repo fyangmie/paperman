@@ -1,0 +1,31 @@
+# pixi
+.pixi/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache (user-specific, not project)
+.cache/
+
+# Environment
+.env
+.envrc
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage

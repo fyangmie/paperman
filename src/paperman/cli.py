@@ -1,0 +1,497 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import typer
+from loguru import logger
+
+from paperman.utils.log import setup_logger
+from paperman.utils.console import console, print_paper, Spinner
+from paperman.models.paper import SourceType, Paper
+from paperman.sources.classifier import classify
+from paperman.fetchers.crossref import CrossrefFetcher
+from paperman.fetchers.arxiv import ArxivFetcher
+from paperman.fetchers.pubmed import PubMedFetcher
+from paperman.downloaders.pipeline import DownloadPipeline
+from paperman.exporters import save_yaml
+from paperman.cache import PaperCache
+
+app = typer.Typer(name="paperman", help="Enhanced academic paper downloader", no_args_is_help=True)
+DEFAULT_OUTPUT = Path.home() / "Documents" / "papers"
+
+
+@app.callback()
+def callback(verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging")) -> None:
+    setup_logger(verbose)
+
+
+def _fetch_metadata(src_id: str, src_type: SourceType) -> Optional[Paper]:
+    """Try all fetchers in priority order."""
+    fetchers: list = [CrossrefFetcher(), ArxivFetcher()]
+    if src_type == SourceType.pmid:
+        fetchers.insert(0, PubMedFetcher())
+    for fetcher in fetchers:
+        paper = fetcher.fetch(src_id, src_type)
+        if paper:
+            paper.source_id = src_id
+            logger.info(f"Metadata from {fetcher.name}")
+            return paper
+    return None
+
+
+def _resolve_pmcid(paper: Paper) -> None:
+    if paper.doi and not paper.pmcid:
+        pmcid = PubMedFetcher.resolve_pmcid(paper.doi)
+        if pmcid:
+            paper.pmcid = pmcid
+            logger.info(f"PMCID: {pmcid}")
+
+
+@app.command()
+def download(
+    identifier: str = typer.Argument(..., help="DOI / PMID / arXiv ID / URL / title"),
+    output: Path = typer.Option(DEFAULT_OUTPUT, "--output", "-o", help="Output directory"),
+    bib: bool = typer.Option(False, "--bib", help="Export BibTeX"),
+    no_pdf: bool = typer.Option(False, "--no-pdf", help="Metadata only, skip PDF"),
+    force: bool = typer.Option(False, "--force", "-f", help="Ignore cache, re-download"),
+) -> None:
+    """Download paper by DOI/PMID/arXiv ID with full metadata."""
+    src = classify(identifier)
+    console.print(f"[dim]Input: {src.type.value} → {src.cleaned[:80]}[/dim]")
+    cache = PaperCache()
+
+    # Check cache
+    paper = None
+    if not force and (src.type == SourceType.doi or src.type == SourceType.pmid):
+        key = src.cleaned
+        cached = cache.get(key) if src.type == SourceType.doi else cache.get_by_pmid(key)
+        if cached:
+            logger.info("Using cached metadata")
+            paper = cached
+
+    # Fetch metadata
+    if paper is None:
+        with Spinner("Fetching metadata..."):
+            paper = _fetch_metadata(src.cleaned, src.type)
+        if paper:
+            cache.set(paper)
+        else:
+            logger.error("Metadata not found")
+            raise typer.Exit(1)
+
+    # Resolve PMCID
+    if not paper.pmcid:
+        with Spinner("Resolving PMCID..."):
+            _resolve_pmcid(paper)
+
+    print_paper(paper)
+
+    # Download PDF
+    if not no_pdf:
+        pipeline = DownloadPipeline()
+        result = pipeline.download(paper, output)
+
+        if result:
+            console.print(f"[green]✓[/] PDF: {result}")
+            cache.update_pdf_path(paper.doi, result) if paper.doi else None
+        else:
+            sources_tried = ", ".join(d.name for d in pipeline.downloaders)
+            console.print(f"[yellow]⚠[/] PDF not available (tried: {sources_tried})")
+            console.print("   Try: vpn or `paperman config --set proxy ...`")
+
+    # Save metadata
+    output.mkdir(parents=True, exist_ok=True)
+    yaml_path = output / f"{paper.safe_filename()}.yaml"
+    yaml_path.write_text(paper.to_yaml())
+    console.print(f"[green]✓[/] YAML: {yaml_path.name}")
+
+    if bib:
+        bib_path = output / f"{paper.safe_filename()}.bib"
+        bib_path.write_text(paper.bibtex())
+        console.print(f"[green]✓[/] Bib: {bib_path.name}")
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Number of results"),
+    source: str = typer.Option("crossref", "--source", "-s", help="crossref | arxiv | all"),
+    download_flag: bool = typer.Option(False, "--download", "-d", help="Download after selecting"),
+    csv: bool = typer.Option(False, "--csv", help="Output as CSV (easy to copy)"),
+) -> None:
+    """Search papers and interactively select to download."""
+    from rich.table import Table
+
+    results: list[Paper] = []
+
+    with Spinner(f"Searching {source}..."):
+        if source in ("crossref", "all"):
+            cf = CrossrefFetcher()
+            r = cf._search_by_title(query)
+            if r:
+                results.extend(results)  # FIXME
+            # CrossRef search by title endpoint
+            import requests
+            resp = requests.get(
+                "https://api.crossref.org/works",
+                params={"query.title": query, "rows": limit},
+                timeout=30,
+                headers={"User-Agent": "Paperman/0.1"},
+            )
+            if resp.status_code == 200:
+                for item in resp.json().get("message", {}).get("items", []):
+                    authors = [f"{a.get('given','')} {a.get('family','')}".strip() for a in item.get("author", [])]
+                    results.append(Paper(
+                        source_type=SourceType.doi,
+                        source_id=item.get("DOI", ""),
+                        doi=item.get("DOI", ""),
+                        title=item.get("title", [""])[0] if item.get("title") else "",
+                        authors=authors,
+                        journal=item.get("container-title", [""])[0] if item.get("container-title") else "",
+                        year=int(item.get("published-print", {}).get("date-parts", [[0]])[0][0])
+                            if item.get("published-print") else None,
+                        metadata_source="crossref",
+                    ))
+
+    if not results:
+        console.print("[yellow]No results found[/yellow]")
+        return
+
+    if csv:
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["#", "Title", "Year", "DOI"])
+        for i, p in enumerate(results, 1):
+            w.writerow([i, p.title, p.year or "", p.doi or ""])
+        console.print(buf.getvalue())
+    else:
+        table = Table(title=f"Results for '{query}'")
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Title", overflow="fold")
+        table.add_column("Year", width=5)
+        table.add_column("DOI", width=30, overflow="fold")
+        for i, p in enumerate(results, 1):
+            table.add_row(str(i), p.title, str(p.year or ""), p.doi or "")
+        console.print(table)
+
+    if download_flag:
+        idx = typer.prompt("Select paper to download (number)", type=int, default=1)
+        if 1 <= idx <= len(results):
+            paper = results[idx - 1]
+            if paper.doi:
+                download(paper.doi)
+            elif paper.title:
+                download(paper.title)
+
+
+@app.command(name="list")
+def _list(
+    query: str = typer.Option("", "--query", "-q", help="Filter by keyword"),
+) -> None:
+    """List cached/downloaded papers."""
+    from rich.table import Table
+
+    cache = PaperCache()
+    papers = cache.search(query) if query else cache.list_all()
+
+    if not papers:
+        console.print("[yellow]No papers in cache[/yellow]")
+        return
+
+    table = Table(title=f"Cached papers{' matching: ' + query if query else ''}")
+    table.add_column("DOI")
+    table.add_column("Title", width=45)
+    table.add_column("Year")
+    table.add_column("PDF", width=10)
+
+    for p in papers:
+        table.add_row(
+            p.doi or "",
+            p.title[:45] if p.title else "(no title)",
+            str(p.year or ""),
+            "[green]✓[/]" if p.pdf_path else "[dim]—[/]",
+        )
+    console.print(table)
+
+
+@app.command()
+def show(
+    identifier: str = typer.Argument(..., help="DOI or PMID"),
+) -> None:
+    """Show cached paper details."""
+    cache = PaperCache()
+    src = classify(identifier)
+    paper = None
+    if src.type == SourceType.doi:
+        paper = cache.get(src.cleaned)
+    elif src.type == SourceType.pmid:
+        paper = cache.get_by_pmid(src.cleaned)
+
+    if paper:
+        print_paper(paper)
+        if paper.abstract:
+            console.print(f"\n[bold]Abstract:[/bold]\n{paper.abstract[:500]}")
+    else:
+        logger.error("Paper not found in cache")
+
+
+@app.command()
+def batch(
+    file: Path = typer.Argument(..., help="File with DOIs/PMIDs, one per line"),
+    output: Path = typer.Option(DEFAULT_OUTPUT, "--output", "-o"),
+    bib: bool = typer.Option(False, "--bib", help="Export BibTeX"),
+) -> None:
+    """Batch download papers from a file."""
+    if not file.exists():
+        logger.error(f"File not found: {file}")
+        raise typer.Exit(1)
+
+    identifiers = [line.strip() for line in file.read_text().splitlines() if line.strip()]
+    console.print(f"[dim]{len(identifiers)} identifiers loaded[/dim]")
+
+    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
+
+    success = 0
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Downloading...", total=len(identifiers))
+        for id_ in identifiers:
+            progress.update(task, description=f"[bold]{id_[:50]}[/bold]")
+            try:
+                download(id_, output=output, bib=bib, no_pdf=False)
+                success += 1
+            except SystemExit:
+                logger.warning(f"Failed: {id_}")
+            progress.advance(task)
+
+    console.print(f"\n[green]Batch done: {success}/{len(identifiers)} succeeded[/green]")
+
+
+@app.command()
+def config(
+    show_all: bool = typer.Option(False, "--show", help="Show current config"),
+    set_key: str = typer.Option("", "--set", help="Config key"),
+    set_val: str = typer.Option("", "--value", help="Config value"),
+) -> None:
+    """View or modify configuration."""
+    from configparser import ConfigParser
+
+    cfg_path = Path.home() / ".config" / "paperman" / "config.ini"
+    cfg_dir = cfg_path.parent
+    cfg = ConfigParser()
+
+    if cfg_path.exists():
+        cfg.read(cfg_path)
+
+    if set_key and set_val:
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        if "settings" not in cfg:
+            cfg["settings"] = {}
+        cfg["settings"][set_key] = set_val
+        with open(cfg_path, "w") as f:
+            cfg.write(f)
+        console.print(f"[green]✓[/] {set_key} = {set_val}")
+
+    default_output = cfg.get("settings", "output", fallback=str(DEFAULT_OUTPUT))
+    proxy = cfg.get("settings", "proxy", fallback="")
+    console.print(f"[dim]Config file:[/dim] {cfg_path}")
+    console.print(f"  output = {default_output}")
+    console.print(f"  proxy  = {proxy or '(none)'}")
+    if proxy:
+        from paperman.utils.network import http
+        http.reload_proxy()
+
+
+@app.command()
+def stats() -> None:
+    """Show download statistics (cache vs actual files)."""
+    from rich.table import Table
+
+    # Cache stats
+    cache = PaperCache()
+    papers = cache.list_all()
+    cached_total = len(papers)
+    cached_with_pdf = sum(1 for p in papers if p.pdf_path and p.pdf_path.exists())
+    cached_stale = sum(1 for p in papers if p.pdf_path and not p.pdf_path.exists())
+
+    # Disk stats (scan output directory)
+    pdf_dir = DEFAULT_OUTPUT
+    disk_pdfs = list(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
+    disk_total = len(disk_pdfs)
+    disk_size_mb = sum(f.stat().st_size for f in disk_pdfs) / 1024 / 1024
+
+    # Year distribution from disk files
+    by_year: dict[int, int] = {}
+    for p in papers:
+        if p.year:
+            by_year[p.year] = by_year.get(p.year, 0) + 1
+
+    table = Table(title="Paperman Stats")
+    table.add_column("Source", style="bold cyan")
+    table.add_column("Count")
+    table.add_row("Cache (metadata queried)", str(cached_total))
+    table.add_row("  ├─ With valid PDF", f"[green]{cached_with_pdf}[/green]")
+    if cached_stale:
+        table.add_row("  └─ Stale (file deleted)", f"[yellow]{cached_stale}[/yellow]")
+    table.add_row("")
+    table.add_row(f"Files on disk ({pdf_dir})", str(disk_total))
+    table.add_row("  └─ Total size", f"{disk_size_mb:.1f} MB")
+    console.print(table)
+
+    tables = []
+    if by_year:
+        years = Table(title="Cache by Year", show_header=False)
+        years.add_column("Year")
+        years.add_column("Count")
+        for y in sorted(by_year, reverse=True):
+            years.add_row(str(y), str(by_year[y]))
+        tables.append(years)
+
+    disk_by_year: dict[int, int] = {}
+    for pdf in disk_pdfs:
+        disk_name = pdf.stem
+        for p in papers:
+            if p.safe_filename() == disk_name and p.year:
+                disk_by_year[p.year] = disk_by_year.get(p.year, 0) + 1
+                break
+    if disk_by_year:
+        disk_years = Table(title="Disk by Year", show_header=False)
+        disk_years.add_column("Year")
+        disk_years.add_column("Count")
+        for y in sorted(disk_by_year, reverse=True):
+            disk_years.add_row(str(y), str(disk_by_year[y]))
+        tables.append(disk_years)
+
+    if len(tables) > 1:
+        from rich.columns import Columns
+        console.print(Columns(tables))
+    elif tables:
+        console.print(tables[0])
+
+
+def _cache_size() -> float:
+    total = 0
+    cache_dir = Path.home() / ".cache" / "paperman"
+    if cache_dir.exists():
+        for f in cache_dir.iterdir():
+            if f.is_file():
+                total += f.stat().st_size
+    return total / 1024 / 1024
+
+
+
+
+
+@app.command()
+def scholar(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(5, "--limit", "-l", help="Max results"),
+    output: Path = typer.Option(DEFAULT_OUTPUT, "--output", "-o"),
+    download_all: bool = typer.Option(False, "--download", "-d", help="Download all results"),
+    csv: bool = typer.Option(False, "--csv", help="Output as CSV (easy to copy)"),
+) -> None:
+    """Search Google Scholar and download papers."""
+    from rich.table import Table
+    from paperman.fetchers.scholar import search_scholar
+
+    with Spinner(f"Searching Google Scholar for '{query}'..."):
+        results = search_scholar(query, limit)
+
+    if not results:
+        console.print("[yellow]No results or blocked by CAPTCHA[/yellow]")
+        return
+
+    if csv:
+        import csv as csv_mod
+        import io
+        buf = io.StringIO()
+        w = csv_mod.writer(buf)
+        w.writerow(["#", "Title", "PDF"])
+        for i, r in enumerate(results, 1):
+            w.writerow([i, r["title"], "Yes" if r["pdf_url"] else ""])
+        console.print(buf.getvalue())
+    else:
+        tw = console.width - 25
+        table = Table(title=f"Google Scholar results for '{query}'")
+        table.add_column("#", style="dim")
+        table.add_column("Title", width=max(30, tw), overflow="fold")
+        table.add_column("PDF", width=5)
+        for i, r in enumerate(results, 1):
+            table.add_row(str(i), r["title"], "[green]✓[/]" if r["pdf_url"] else "—")
+        console.print(table)
+
+    if download_all:
+        for i, r in enumerate(results, 1):
+            if r["pdf_url"]:
+                console.print(f"\n[bold][{i}][/bold] {r['title'][:50]}")
+                paper = Paper(
+                    source_type=SourceType.url,
+                    source_id=r["url"],
+                    title=r["title"],
+                    pdf_url=r["pdf_url"],
+                    metadata_source="google_scholar",
+                )
+                pipeline = DownloadPipeline()
+                with Spinner("Downloading..."):
+                    result = pipeline.download(paper, output)
+                if result:
+                    console.print(f"[green]✓[/] {result.name}")
+    else:
+        idx = typer.prompt("Download paper (number)", type=int, default=1)
+        if 1 <= idx <= len(results):
+            r = results[idx - 1]
+            if r["pdf_url"]:
+                paper = Paper(
+                    source_type=SourceType.url,
+                    source_id=r["url"],
+                    title=r["title"],
+                    pdf_url=r["pdf_url"],
+                    metadata_source="google_scholar",
+                )
+                pipeline = DownloadPipeline()
+                with Spinner("Downloading..."):
+                    result = pipeline.download(paper, output)
+                if result:
+                    console.print(f"[green]✓[/] {result.name}")
+                save_yaml(paper, output)
+            else:
+                logger.warning("No PDF link found in Google Scholar result")
+
+
+@app.command()
+def remove(
+    identifier: str = typer.Argument(..., help="DOI / PMID to remove from cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+) -> None:
+    """Remove a paper from cache."""
+    cache = PaperCache()
+    src = classify(identifier)
+    key = src.cleaned if src.type == SourceType.doi else src.pmid
+    paper = cache.get(key) if src.type == SourceType.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
+
+    if not paper:
+        logger.error("Paper not found in cache")
+        return
+
+    if not yes:
+        typer.confirm(f"Remove '{paper.title[:50]}'?", abort=True)
+
+    cache.remove(paper.doi or "")
+    if paper.pdf_path and paper.pdf_path.exists():
+        paper.pdf_path.unlink()
+    console.print(f"[green]✓[/] Removed: {paper.title[:50]}")
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()
