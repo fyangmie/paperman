@@ -116,7 +116,7 @@ def download(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(10, "--limit", "-l", help="Number of results"),
-    source: str = typer.Option("crossref", "--source", "-s", help="crossref | arxiv | all"),
+    source: str = typer.Option("crossref", "--source", "-s", help="crossref | pubmed | all"),
     download_flag: bool = typer.Option(False, "--download", "-d", help="Download after selecting"),
     csv: bool = typer.Option(False, "--csv", help="Output as CSV (easy to copy)"),
 ) -> None:
@@ -127,11 +127,6 @@ def search(
 
     with Spinner(f"Searching {source}..."):
         if source in ("crossref", "all"):
-            cf = CrossrefFetcher()
-            r = cf._search_by_title(query)
-            if r:
-                results.extend(results)  # FIXME
-            # CrossRef search by title endpoint
             import requests
             resp = requests.get(
                 "https://api.crossref.org/works",
@@ -153,6 +148,10 @@ def search(
                             if item.get("published-print") else None,
                         metadata_source="crossref",
                     ))
+
+        if source in ("pubmed", "all"):
+            from paperman.fetchers.pubmed import PubMedFetcher
+            results.extend(PubMedFetcher.search_by_query(query, limit))
 
     if not results:
         console.print("[yellow]No results found[/yellow]")
@@ -243,6 +242,8 @@ def batch(
     file: Path = typer.Argument(..., help="File with DOIs/PMIDs, one per line"),
     output: Path = typer.Option(DEFAULT_OUTPUT, "--output", "-o"),
     bib: bool = typer.Option(False, "--bib", help="Export BibTeX"),
+    resume: bool = typer.Option(False, "--resume", "-r", help="Skip already downloaded papers"),
+    no_pdf: bool = typer.Option(False, "--no-pdf", help="Metadata only, skip PDF"),
 ) -> None:
     """Batch download papers from a file."""
     if not file.exists():
@@ -251,6 +252,23 @@ def batch(
 
     identifiers = [line.strip() for line in file.read_text().splitlines() if line.strip()]
     console.print(f"[dim]{len(identifiers)} identifiers loaded[/dim]")
+
+    if resume:
+        cache = PaperCache()
+        skipped = 0
+        filtered = []
+        for id_ in identifiers:
+            src = classify(id_)
+            paper = cache.get(id_) if src.type == SourceType.doi else cache.get_by_pmid(id_) if src.pmid else None
+            if paper and paper.pdf_path and paper.pdf_path.exists():
+                skipped += 1
+                continue
+            filtered.append(id_)
+        identifiers = filtered
+        console.print(f"[dim]Resume: {skipped} already downloaded, {len(identifiers)} remaining[/dim]")
+        if not identifiers:
+            console.print("[green]All papers already downloaded[/green]")
+            return
 
     from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
 
@@ -265,7 +283,7 @@ def batch(
         for id_ in identifiers:
             progress.update(task, description=f"[bold]{id_[:50]}[/bold]")
             try:
-                download(id_, output=output, bib=bib, no_pdf=False)
+                download(id_, output=output, bib=bib, no_pdf=no_pdf)
                 success += 1
             except SystemExit:
                 logger.warning(f"Failed: {id_}")
@@ -376,19 +394,6 @@ def stats() -> None:
         console.print(tables[0])
 
 
-def _cache_size() -> float:
-    total = 0
-    cache_dir = Path.home() / ".cache" / "paperman"
-    if cache_dir.exists():
-        for f in cache_dir.iterdir():
-            if f.is_file():
-                total += f.stat().st_size
-    return total / 1024 / 1024
-
-
-
-
-
 @app.command()
 def scholar(
     query: str = typer.Argument(..., help="Search query"),
@@ -443,6 +448,7 @@ def scholar(
                     result = pipeline.download(paper, output)
                 if result:
                     console.print(f"[green]✓[/] {result.name}")
+                save_yaml(paper, output)
     else:
         idx = typer.prompt("Download paper (number)", type=int, default=1)
         if 1 <= idx <= len(results):
@@ -463,6 +469,52 @@ def scholar(
                 save_yaml(paper, output)
             else:
                 logger.warning("No PDF link found in Google Scholar result")
+
+
+@app.command()
+def prune(
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be removed"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    all: bool = typer.Option(False, "--all", "-a", help="Remove ALL cache entries"),
+) -> None:
+    """Remove stale or all cache entries."""
+    cache = PaperCache()
+    papers = cache.list_all()
+
+    if all:
+        if not dry_run:
+            if not yes:
+                typer.confirm(f"Remove all {len(papers)} cached entries?", abort=True)
+            for p in papers:
+                cache.remove(p.doi or "")
+                if p.pdf_path and p.pdf_path.exists():
+                    p.pdf_path.unlink()
+            console.print(f"[green]✓[/] Cleared all {len(papers)} cache entries")
+        else:
+            console.print(f"[yellow]Would remove {len(papers)} entries:[/yellow]")
+            for p in papers[:5]:
+                console.print(f"  {p.doi or p.pmid}: {p.title[:60]}...")
+            if len(papers) > 5:
+                console.print(f"  ... and {len(papers) - 5} more")
+        return
+
+    stale = [p for p in papers if p.pdf_path and not p.pdf_path.exists()]
+    if not stale:
+        console.print("[green]No stale cache entries[/green]")
+        return
+
+    console.print(f"[yellow]{len(stale)} stale entries found:[/yellow]")
+    for p in stale:
+        console.print(f"  {p.doi or p.pmid}: {p.title[:60]}... (PDF missing)")
+        if dry_run:
+            continue
+        if not yes:
+            typer.confirm("  Remove?", abort=True)
+        cache.remove(p.doi or "")
+        console.print("  [green]✓[/] Removed")
+
+    if dry_run:
+        console.print("\nRun without --dry-run to remove them.")
 
 
 @app.command()

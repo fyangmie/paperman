@@ -30,6 +30,17 @@ PUBLISHER_PATTERNS: dict[str, str] = {
     "10.1073":  "https://www.pnas.org/doi/pdf/{doi}",
     "10.1084":  "https://rupress.org/jem/article-pdf/{doi}",
     "10.2337":  "https://diabetes.diabetesjournals.org/doi/pdf/{doi}",
+    "10.1056":  "https://www.nejm.org/doi/pdf/{doi}",
+    "10.1136":  "https://heart.bmj.com/content/{doi}.pdf",
+    "10.1152":  "https://journals.physiology.org/doi/pdf/{doi}",
+    "10.1158":  "https://cancerres.aacrjournals.org/content/{doi}.pdf",
+    "10.4049":  "https://www.jimmunol.org/content/{doi}.full.pdf",
+    "10.1681":  "https://jasn.asnjournals.org/content/{doi}.full.pdf",
+    "10.1200":  "https://ascopubs.org/doi/pdf/{doi}",
+    "10.4161":  "https://www.tandfonline.com/doi/pdf/{doi}",
+    "10.2147":  "https://www.dovepress.com/getfile.php?file={suffix}",
+    "10.3892":  "https://www.spandidos-publications.com/{doi}/download",
+    "10.21037": "https://atm.amegroups.com/article/view/{doi}/pdf",
 }
 
 
@@ -57,14 +68,10 @@ class PublisherDownloader(BaseDownloader):
         pattern = PUBLISHER_PATTERNS[prefix]
         url = pattern.format(doi=doi, suffix=suffix)
 
-        # Quick header check: skip only on 4xx/5xx
+        # HEAD check: only skip on 404 (pattern wrong), let 403/401/302 pass
         resp = http.head(url)
-        if resp is None:
-            logger.debug("  publisher: HEAD failed, returning URL anyway")
-            return url
-        if resp.status_code >= 400:
-            logger.debug(f"  publisher: {url[:70]} -> {resp.status_code}")
+        if resp is not None and resp.status_code == 404:
+            logger.debug(f"  publisher: {url[:70]} -> 404, skipping")
             return None
 
-        logger.debug(f"  publisher: {url[:70]} -> {resp.status_code}")
         return url
