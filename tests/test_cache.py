@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from paperman.models.paper import Paper, SourceType
 from paperman.cache import PaperCache
 

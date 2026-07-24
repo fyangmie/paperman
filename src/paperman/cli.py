@@ -13,6 +13,7 @@ from paperman.sources.classifier import classify
 from paperman.fetchers.crossref import CrossrefFetcher
 from paperman.fetchers.arxiv import ArxivFetcher
 from paperman.fetchers.pubmed import PubMedFetcher
+from paperman.fetchers.openalex import OpenAlexFetcher
 from paperman.downloaders.pipeline import DownloadPipeline
 from paperman.exporters import save_yaml
 from paperman.cache import PaperCache
@@ -29,7 +30,7 @@ def callback(verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbos
 
 def _fetch_metadata(src_id: str, src_type: SourceType) -> Optional[Paper]:
     """Try all fetchers in priority order."""
-    fetchers: list = [CrossrefFetcher(), ArxivFetcher()]
+    fetchers: list = [CrossrefFetcher(), ArxivFetcher(), OpenAlexFetcher()]
     if src_type == SourceType.pmid:
         fetchers.insert(0, PubMedFetcher())
     for fetcher in fetchers:
@@ -117,7 +118,7 @@ def download(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(10, "--limit", "-l", help="Number of results"),
-    source: str = typer.Option("crossref", "--source", "-s", help="crossref | pubmed | eupmc | all"),
+    source: str = typer.Option("crossref", "--source", "-s", help="crossref | pubmed | eupmc | openalex | all"),
     download_flag: bool = typer.Option(False, "--download", "-d", help="Download after selecting"),
     csv: bool = typer.Option(False, "--csv", help="Output as CSV (easy to copy)"),
 ) -> None:
@@ -151,6 +152,10 @@ def search(
         if source in ("eupmc", "all"):
             from paperman.fetchers.pubmed import PubMedFetcher
             results.extend(PubMedFetcher.search_europepmc(query, limit))
+
+        if source in ("openalex", "all"):
+            from paperman.fetchers.openalex import OpenAlexFetcher
+            results.extend(OpenAlexFetcher.search_by_query(query, limit))
 
     if not results:
         console.print("[yellow]No results found[/yellow]")
@@ -232,6 +237,21 @@ def show(
         print_paper(paper)
         if paper.abstract:
             console.print(f"\n[bold]Abstract:[/bold]\n{paper.abstract[:500]}")
+        # Show Semantic Scholar citation data if DOI is available
+        if paper.doi:
+            resp = http.get(
+                "https://api.semanticscholar.org/graph/v1/paper/DOI:" + paper.doi,
+                params={"fields": "citationCount,influentialCitationCount"},
+            )
+            if resp is not None:
+                s2 = resp.json()
+                parts = []
+                if s2.get("citationCount"):
+                    parts.append(f"cited: [cyan]{s2['citationCount']}[/cyan]")
+                if s2.get("influentialCitationCount"):
+                    parts.append(f"influential: [cyan]{s2['influentialCitationCount']}[/cyan]")
+                if parts:
+                    console.print(f"\n[bold]Citations:[/bold] {' | '.join(parts)}")
     else:
         logger.error("Paper not found in cache")
 
@@ -338,6 +358,107 @@ def batch(
             for r in results:
                 w.writerow([r["identifier"], r["status"], r["pdf"], r["yaml"]])
         console.print(f"[green]✓[/] Log: {log}")
+
+
+@app.command()
+def import_bib(
+    file: Path = typer.Argument(..., help="Path to .bib file"),
+    output: Path = typer.Option(DEFAULT_OUTPUT, "--output", "-o"),
+    no_pdf: bool = typer.Option(False, "--no-pdf", help="Metadata only, skip PDF"),
+) -> None:
+    """Import papers from a BibTeX file."""
+    if not file.exists():
+        logger.error(f"File not found: {file}")
+        raise typer.Exit(1)
+
+    import bibtexparser
+    with open(file) as f:
+        db = bibtexparser.load(f)
+
+    entries = db.entries if hasattr(db, "entries") else db.get("entries", [])
+    console.print(f"[dim]{len(entries)} entries loaded from {file.name}[/dim]")
+
+    cache = PaperCache()
+    success = 0
+    for entry in entries:
+        doi = entry.get("doi", "").strip()
+        pmid = entry.get("pmid", "").strip()
+        title = entry.get("title", "").strip().rstrip(".").strip()
+        identifier = doi or pmid or title
+        if not identifier:
+            logger.warning(f"Skipping entry with no DOI/PMID/title: {entry.get('ID', '?')}")
+            continue
+
+        src = classify(identifier)
+        paper = _fetch_metadata(src.cleaned, src.type)
+        if paper is None:
+            logger.warning(f"Could not fetch metadata: {identifier}")
+            continue
+
+        cache.set(paper)
+        _resolve_pmcid(paper)
+        cache.set(paper)
+
+        # Attach local PDF from BibTeX file field if present
+        bib_pdf = entry.get("file", "")
+        if bib_pdf:
+            pdf_candidates = [p.strip() for p in bib_pdf.replace(":", ";").split(";") if p.strip().endswith(".pdf")]
+            for cand in pdf_candidates:
+                p = Path(cand)
+                if p.exists():
+                    from paperman.downloaders.pipeline import DownloadPipeline
+                    paper.pdf_path = p
+                    if paper.doi:
+                        cache.update_pdf_path(paper.doi, p)
+                    console.print(f"  [green]✓[/] attached PDF: {p.name}")
+                    break
+
+        if not no_pdf:
+            from paperman.downloaders.pipeline import DownloadPipeline
+            pipeline = DownloadPipeline()
+            pdf_path = pipeline.download(paper, output)
+            if pdf_path and paper.doi:
+                cache.update_pdf_path(paper.doi, pdf_path)
+
+        yaml_path = output / f"{paper.safe_filename()}.yaml"
+        yaml_path.write_text(paper.to_yaml())
+        success += 1
+
+    console.print(f"\n[green]Imported: {success}/{len(entries)} papers[/green]")
+
+
+@app.command()
+def open_paper(
+    identifier: str = typer.Argument(..., help="DOI / PMID / title"),
+) -> None:
+    """Open a downloaded paper's PDF with the system viewer."""
+    import subprocess
+    import webbrowser
+
+    cache = PaperCache()
+    src = classify(identifier)
+    paper = None
+    if src.type == SourceType.doi:
+        paper = cache.get(src.cleaned)
+    elif src.type == SourceType.pmid:
+        paper = cache.get_by_pmid(src.cleaned)
+    elif src.type == SourceType.title:
+        papers = cache.search(identifier)
+        if papers:
+            paper = papers[0]
+
+    if not paper or not paper.pdf_path or not paper.pdf_path.exists():
+        logger.error("Paper PDF not found in cache")
+        console.print(f"  Try: [dim]paperman download {identifier}[/dim]")
+        raise typer.Exit(1)
+
+    pdf_path = paper.pdf_path
+    console.print(f"[green]✓[/] Opening: {pdf_path.name}")
+    try:
+        if webbrowser.open(str(pdf_path)) is False:
+            subprocess.run(["xdg-open", str(pdf_path)], check=False)
+    except Exception:
+        subprocess.run(["xdg-open", str(pdf_path)], check=False)
 
 
 @app.command()

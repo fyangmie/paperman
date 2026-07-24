@@ -9,6 +9,17 @@ from paperman.downloaders.base import BaseDownloader
 from paperman.utils.network import http
 
 
+PLOS_JOURNALS: dict[str, str] = {
+    "pbio": "plosbiology",
+    "pgen": "plosgenetics",
+    "pone": "plosone",
+    "pmed": "plosmedicine",
+    "pntd": "plosntds",
+    "pcbi": "ploscompbiol",
+    "ppat": "plospathogens",
+    "pclm": "plosclimate",
+}
+
 PUBLISHER_PATTERNS: dict[str, str] = {
     "10.1016":  "https://www.sciencedirect.com/science/article/pii/{suffix}",
     "10.1038":  "https://www.nature.com/articles/{suffix}.pdf",
@@ -68,14 +79,20 @@ class PublisherDownloader(BaseDownloader):
         pattern = PUBLISHER_PATTERNS[prefix]
 
         # Extract journal slug for PLOS (10.1371/journal.pbio.XXX → pbio)
-        journal = suffix.split(".")[0] if prefix == "10.1371" else ""
+        if prefix == "10.1371" and "." in suffix:
+            slug = suffix.split(".")[1]
+            journal = PLOS_JOURNALS.get(slug, slug)
+        else:
+            journal = ""
 
         url = pattern.format(doi=doi, suffix=suffix, journal=journal)
 
-        # HEAD check: only skip on 404 (pattern wrong), let 403/401/302 pass
-        resp = http.head(url)
-        if resp is not None and resp.status_code == 404:
-            logger.debug(f"  publisher: {url[:70]} -> 404, skipping")
-            return None
+        # HEAD check for non-PLOS URLs: skip on 404 (pattern likely wrong)
+        # PLOS returns 404 on HEAD for valid PDF URLs, so skip the check
+        if prefix != "10.1371":
+            resp = http.head(url)
+            if resp is not None and resp.status_code == 404:
+                logger.debug(f"  publisher: {url[:70]} -> 404, skipping")
+                return None
 
         return url
