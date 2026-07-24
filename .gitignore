@@ -31,3 +31,8 @@ htmlcov/
 .coverage
 
 AGENTS.md
+
+# Nuitka build artifacts
+cli.dist/
+cli.build/
+cli.onefile-build/
