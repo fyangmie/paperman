@@ -76,10 +76,29 @@ class PaperCache:
     def search(self, query: str) -> list[Paper]:
         q = f"%{query}%"
         cur = self.conn.execute(
-            "SELECT data FROM papers WHERE doi LIKE ? OR pmid LIKE ? OR data LIKE ? ORDER BY created_at DESC",
-            (q, q, q),
+            "SELECT data FROM papers WHERE doi LIKE ? OR pmid LIKE ? ORDER BY created_at DESC",
+            (q, q),
         )
-        return [Paper.model_validate_json(row[0]) for row in cur.fetchall()]
+        papers = [Paper.model_validate_json(row[0]) for row in cur.fetchall()]
+        query_lower = query.lower()
+        return [
+            p for p in papers
+            if query_lower in p.title.lower()
+            or query_lower in str(p.authors).lower()
+            or query_lower in p.journal.lower()
+        ]
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __del__(self):
+        self.close()
 
     def remove(self, doi: str) -> None:
         self.conn.execute("DELETE FROM papers WHERE doi = ?", (doi,))

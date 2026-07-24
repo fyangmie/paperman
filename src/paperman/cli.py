@@ -271,34 +271,63 @@ def batch(
             return
 
     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+    from paperman.downloaders.pipeline import DownloadPipeline
+
+    logger.disable("paperman")
 
     success = 0
     results: list[dict] = []
 
     progress = Progress(
         TextColumn("{task.description}"),
-        BarColumn(),
+        BarColumn(bar_width=None),
         TextColumn("{task.percentage:>3.0f}%"),
         TimeRemainingColumn(),
         console=console,
         redirect_stdout=True,
     )
     with progress:
-        task = progress.add_task("Downloading...", total=len(identifiers))
+        task = progress.add_task("", total=len(identifiers))
+        output.mkdir(parents=True, exist_ok=True)
         for id_ in identifiers:
             progress.update(task, description=id_[:60])
-            try:
-                download(id_, output=output, bib=bib, no_pdf=no_pdf)
-                success += 1
-                src = classify(id_)
-                paper = cache.get(src.doi) if src.type == SourceType.doi and src.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
-                pdf_ok = "yes" if (paper and paper.pdf_path and paper.pdf_path.exists()) else "no"
-                results.append({"identifier": id_, "status": "success", "pdf": pdf_ok, "yaml": "yes"})
-            except SystemExit:
+            src = classify(id_)
+
+            paper = _fetch_metadata(src.cleaned, src.type)
+            if paper is None:
+                console.print(f"[red]✗[/] {id_}  [dim]metadata not found[/dim]")
                 results.append({"identifier": id_, "status": "failure", "pdf": "no", "yaml": "no"})
+                progress.advance(task)
+                continue
+
+            cache.set(paper)
+            _resolve_pmcid(paper)
+            cache.set(paper)
+
+            pdf_ok = "no"
+            if not no_pdf:
+                pipeline = DownloadPipeline()
+                pdf_path = pipeline.download(paper, output)
+                if pdf_path:
+                    pdf_ok = "yes"
+                    if paper.doi:
+                        cache.update_pdf_path(paper.doi, pdf_path)
+
+            yaml_path = output / f"{paper.safe_filename()}.yaml"
+            yaml_path.write_text(paper.to_yaml())
+
+            if bib:
+                from paperman.exporters import save_bibtex
+                save_bibtex(paper, output)
+
+            success += 1
+            icon = "[green]✓[/]" if pdf_ok == "yes" else "[yellow]✓[/]"
+            console.print(f"{icon} {id_}  pdf:{pdf_ok}  yaml:yes")
+            results.append({"identifier": id_, "status": "success", "pdf": pdf_ok, "yaml": "yes"})
             progress.advance(task)
 
-    console.print(f"\n[green]Batch done: {success}/{len(identifiers)} succeeded[/green]")
+    logger.enable("paperman")
+    console.print(f"\nBatch done: [green]{success}[/green]/[dim]{len(identifiers)}[/dim] succeeded")
 
     if log:
         import csv
@@ -361,8 +390,13 @@ def stats() -> None:
     cached_with_pdf = sum(1 for p in papers if p.pdf_path and p.pdf_path.exists())
     cached_stale = sum(1 for p in papers if p.pdf_path and not p.pdf_path.exists())
 
-    # Disk stats (scan output directory)
-    pdf_dir = DEFAULT_OUTPUT
+    # Disk stats (scan output directory from config or default)
+    from configparser import ConfigParser
+    cfg_path = Path.home() / ".config" / "paperman" / "config.ini"
+    cfg = ConfigParser()
+    if cfg_path.exists():
+        cfg.read(cfg_path)
+    pdf_dir = Path(cfg.get("settings", "output", fallback=str(DEFAULT_OUTPUT)))
     disk_pdfs = list(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
     disk_total = len(disk_pdfs)
     disk_size_mb = sum(f.stat().st_size for f in disk_pdfs) / 1024 / 1024

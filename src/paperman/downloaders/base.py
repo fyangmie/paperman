@@ -28,7 +28,9 @@ class BaseDownloader(ABC):
             return None
 
         body = resp.content
-        if len(body) > 10000 and body[:4] == b"%PDF":
+        # Valid PDFs may have leading whitespace or BOM; search for %PDF within first KB
+        pdf_pos = body.find(b"%PDF")
+        if pdf_pos >= 0 and pdf_pos < 1024 and len(body) > 10000:
             path = dest / f"{paper.safe_filename()}.pdf"
             path.write_bytes(body)
             return path

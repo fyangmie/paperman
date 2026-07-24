@@ -18,15 +18,7 @@ def save_bibtex(paper: Paper, dest: Path) -> Path:
 
 
 def export_zotero(paper: Paper, dest: Path) -> list[Path]:
-    """Export paper as BibTeX + PDF pair for Zotero auto-import.
-
-    Creates two files in the destination folder:
-      {title}.bib  — Better BibTeX with relative file attachment path
-      {title}.pdf  — (must be placed in same folder by caller)
-
-    Zotero's 'Enable automated attachment import' will pick up
-    .bib + .pdf pairs and auto-import them into your library.
-    """
+    """Export paper as BibTeX + PDF pair for Zotero auto-import."""
     saved = []
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -35,18 +27,18 @@ def export_zotero(paper: Paper, dest: Path) -> list[Path]:
     pdf_rel = f"{name}.pdf" if paper.pdf_path else None
 
     bib = paper.bibtex()
-
-    # Append local file attachment for Zotero (relative path to PDF in same dir)
-    lines = [bib.strip().rstrip("}").rstrip()]
+    # Insert extra fields before the closing "}"
+    extra = []
     if pdf_rel:
-        lines.append(f",\n  file = {{{pdf_rel}}}")
+        extra.append(f"  file = {{{pdf_rel}}}")
     if paper.pmcid:
-        lines.append(f",\n  pmcid = {{{paper.pmcid}}}")
+        extra.append(f"  pmcid = {{{paper.pmcid}}}")
     if paper.pdf_url and not pdf_rel:
-        lines.append(f",\n  url = {{{paper.pdf_url}}}")
-    lines.append("\n}")
+        extra.append(f"  url = {{{paper.pdf_url}}}")
+    if extra:
+        bib = bib.rstrip() + "\n" + ",\n".join(extra) + "\n}"
 
-    bib_path.write_text("".join(lines))
+    bib_path.write_text(bib)
     saved.append(bib_path)
 
     return saved

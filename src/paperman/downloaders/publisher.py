@@ -23,10 +23,10 @@ PUBLISHER_PATTERNS: dict[str, str] = {
     "10.1080":  "https://www.tandfonline.com/doi/pdf/{doi}",
     "10.1210":  "https://academic.oup.com/{doi}/article-pdf",
     "10.1172":  "https://www.jci.org/articles/view/{suffix}/pdf",
-    "10.1371":  "https://journals.plos.org/plosone/article/file?id={doi}",
+    "10.1371":  "https://journals.plos.org/{journal}/article/file?id={doi}",
     "10.15252": "https://www.embopress.org/doi/pdf/{doi}",
     "10.1242":  "https://journals.biologists.com/{doi}/article-pdf",
-    "10.1101":  "https://www.biorxiv.org/content/{doi}v1.full.pdf",
+    "10.1101":  "https://www.biorxiv.org/content/{doi}.full.pdf",
     "10.1073":  "https://www.pnas.org/doi/pdf/{doi}",
     "10.1084":  "https://rupress.org/jem/article-pdf/{doi}",
     "10.2337":  "https://diabetes.diabetesjournals.org/doi/pdf/{doi}",
@@ -66,7 +66,11 @@ class PublisherDownloader(BaseDownloader):
 
         suffix = doi.replace(prefix, "").lstrip("/")
         pattern = PUBLISHER_PATTERNS[prefix]
-        url = pattern.format(doi=doi, suffix=suffix)
+
+        # Extract journal slug for PLOS (10.1371/journal.pbio.XXX → pbio)
+        journal = suffix.split(".")[0] if prefix == "10.1371" else ""
+
+        url = pattern.format(doi=doi, suffix=suffix, journal=journal)
 
         # HEAD check: only skip on 404 (pattern wrong), let 403/401/302 pass
         resp = http.head(url)

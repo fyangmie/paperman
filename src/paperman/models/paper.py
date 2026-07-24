@@ -4,6 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from pydantic import BaseModel, Field
 
 
@@ -59,68 +60,64 @@ class Paper(BaseModel):
         def esc(s: str) -> str:
             return s.replace("{", "\\{").replace("}", "\\}").replace("&", "\\&")
 
-        lines = [
-            f"@article{{{citekey},",
-            f"  author = {{{esc(author_str)}}},",
-            f"  title = {{{esc(self.title)}}},",
-            f"  journal = {{{esc(self.journal)}}}",
+        fields = [
+            ("author", f"{{{esc(author_str)}}}"),
+            ("title", f"{{{esc(self.title)}}}"),
+            ("journal", f"{{{esc(self.journal)}}}"),
         ]
         if self.year:
-            lines[-1] += ","
-            lines.append(f"  year = {self.year}")
+            fields.append(("year", str(self.year)))
         if self.volume:
-            lines[-1] += ","
-            lines.append(f"  volume = {{{self.volume}}}")
+            fields.append(("volume", f"{{{self.volume}}}"))
         if self.issue:
-            lines[-1] += ","
-            lines.append(f"  number = {{{self.issue}}}")
+            fields.append(("number", f"{{{self.issue}}}"))
         if self.pages:
-            lines[-1] += ","
-            lines.append(f"  pages = {{{self.pages}}}")
+            fields.append(("pages", f"{{{self.pages}}}"))
         if self.doi:
-            lines[-1] += ","
-            lines.append(f"  doi = {{{self.doi}}}")
+            fields.append(("doi", f"{{{self.doi}}}"))
         if self.pmid:
-            lines[-1] += ","
-            lines.append(f"  pmid = {{{self.pmid}}}")
+            fields.append(("pmid", f"{{{self.pmid}}}"))
         if self.pmcid:
-            lines[-1] += ","
-            lines.append(f"  pmcid = {{{self.pmcid}}}")
+            fields.append(("pmcid", f"{{{self.pmcid}}}"))
         if self.publisher:
-            lines[-1] += ","
-            lines.append(f"  publisher = {{{esc(self.publisher)}}}")
+            fields.append(("publisher", f"{{{esc(self.publisher)}}}"))
         if self.keywords:
-            lines[-1] += ","
-            lines.append(f"  keywords = {{{', '.join(self.keywords)}}}")
+            fields.append(("keywords", f"{{{', '.join(self.keywords)}}}"))
+
+        lines = [f"@article{{{citekey},"]
+        for name, val in fields:
+            lines.append(f"  {name} = {val},")
         lines.append("}")
         return "\n".join(lines)
 
     def to_yaml(self) -> str:
-        def esc_yaml(s: str) -> str:
-            return s.replace("'", "''").replace("\n", " ").replace("\r", "")
-        lines = [f"title: '{esc_yaml(self.title)}'"]
+        data: dict = {
+            "title": self.title,
+        }
         if self.authors:
-            lines.append(f"authors: [{', '.join(self.authors)}]")
+            data["authors"] = self.authors
         if self.journal:
-            lines.append(f"journal: {self.journal}")
+            data["journal"] = self.journal
         if self.year:
-            lines.append(f"year: {self.year}")
+            data["year"] = self.year
         if self.doi:
-            lines.append(f"doi: {self.doi}")
+            data["doi"] = self.doi
         if self.pmid:
-            lines.append(f"pmid: {self.pmid}")
+            data["pmid"] = self.pmid
         if self.pmcid:
-            lines.append(f"pmcid: {self.pmcid}")
+            data["pmcid"] = self.pmcid
         if self.arxiv_id:
-            lines.append(f"arxiv: {self.arxiv_id}")
+            data["arxiv"] = self.arxiv_id
         if self.pdf_path:
-            lines.append(f"file: {self.pdf_path}")
+            data["file"] = str(self.pdf_path)
         if self.abstract:
             abbr = self.abstract[:150].replace("\n", " ")
-            lines.append(f"abstract: '{abbr}...'")
-        lines.append("sources:")
+            data["abstract"] = f"{abbr}..."
+        sources: dict = {}
         if self.metadata_source:
-            lines.append(f"  metadata: {self.metadata_source}")
+            sources["metadata"] = self.metadata_source
         if self.pdf_source:
-            lines.append(f"  pdf: {self.pdf_source}")
-        return "\n".join(lines)
+            sources["pdf"] = self.pdf_source
+        if sources:
+            data["sources"] = sources
+        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False).strip()
