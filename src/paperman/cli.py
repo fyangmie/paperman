@@ -244,7 +244,7 @@ def batch(
     bib: bool = typer.Option(False, "--bib", help="Export BibTeX"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Skip already downloaded papers"),
     no_pdf: bool = typer.Option(False, "--no-pdf", help="Metadata only, skip PDF"),
-    log: Optional[Path] = typer.Option(None, "--log", help="Path to TSV log file"),
+    log: Optional[Path] = typer.Option(None, "--log", "-l", help="Path to TSV log file"),
 ) -> None:
     """Batch download papers from a file."""
     if not file.exists():
@@ -271,21 +271,33 @@ def batch(
             console.print("[green]All papers already downloaded[/green]")
             return
 
-    from tqdm import tqdm
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
     success = 0
     results: list[dict] = []
 
-    for id_ in tqdm(identifiers, desc="Downloading", unit="paper"):
-        try:
-            download(id_, output=output, bib=bib, no_pdf=no_pdf)
-            success += 1
-            src = classify(id_)
-            paper = cache.get(src.doi) if src.type == SourceType.doi and src.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
-            pdf_ok = "yes" if (paper and paper.pdf_path and paper.pdf_path.exists()) else "no"
-            results.append({"identifier": id_, "status": "success", "pdf": pdf_ok, "yaml": "yes"})
-        except SystemExit:
-            results.append({"identifier": id_, "status": "failure", "pdf": "no", "yaml": "no"})
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TimeRemainingColumn(),
+        console=console,
+        redirect_stdout=True,
+    )
+    with progress:
+        task = progress.add_task("Downloading...", total=len(identifiers))
+        for id_ in identifiers:
+            progress.update(task, description=id_[:60])
+            try:
+                download(id_, output=output, bib=bib, no_pdf=no_pdf)
+                success += 1
+                src = classify(id_)
+                paper = cache.get(src.doi) if src.type == SourceType.doi and src.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
+                pdf_ok = "yes" if (paper and paper.pdf_path and paper.pdf_path.exists()) else "no"
+                results.append({"identifier": id_, "status": "success", "pdf": pdf_ok, "yaml": "yes"})
+            except SystemExit:
+                results.append({"identifier": id_, "status": "failure", "pdf": "no", "yaml": "no"})
+            progress.advance(task)
 
     console.print(f"\n[green]Batch done: {success}/{len(identifiers)} succeeded[/green]")
 
