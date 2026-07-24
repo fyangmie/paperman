@@ -3,13 +3,12 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Optional
 
-import requests
-
 from paperman.fetchers import BaseFetcher
 from paperman.models.paper import Paper, SourceType
+from paperman.utils.network import http
 
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 
 
 class ArxivFetcher(BaseFetcher):
@@ -27,18 +26,14 @@ class ArxivFetcher(BaseFetcher):
 
     def _fetch_by_id(self, arxiv_id: str) -> Optional[Paper]:
         arxiv_id = arxiv_id.split("v")[0]  # strip version
-        resp = requests.get(f"{ARXIV_API}?id_list={arxiv_id}&max_results=1", timeout=30)
-        if resp.status_code != 200:
+        resp = http.get(f"{ARXIV_API}?id_list={arxiv_id}&max_results=1")
+        if resp is None:
             return None
         return self._parse_entry(self._first_entry(resp.text), arxiv_id)
 
     def _search(self, query: str) -> Optional[Paper]:
-        resp = requests.get(
-            ARXIV_API,
-            params={"search_query": f"all:{query}", "max_results": 5, "sortBy": "relevance"},
-            timeout=30,
-        )
-        if resp.status_code != 200:
+        resp = http.get(ARXIV_API, params={"search_query": f"all:{query}", "max_results": 5, "sortBy": "relevance"})
+        if resp is None:
             return None
         entry = self._first_entry(resp.text)
         if entry is None:

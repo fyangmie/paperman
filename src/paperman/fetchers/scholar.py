@@ -7,8 +7,6 @@ import requests
 from bs4 import BeautifulSoup
 from loguru import logger
 
-from paperman.models.paper import Paper, SourceType
-
 SCHOLAR_URL = "https://scholar.google.com/scholar"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -122,15 +120,4 @@ def _search_selenium(query: str, limit: int = 10) -> list[dict]:
     return results
 
 
-def scholar_download(query: str, limit: int = 1) -> list[Paper]:
-    results = search_scholar(query, limit)
-    return [
-        Paper(
-            source_type=SourceType.url,
-            source_id=r["url"],
-            title=r["title"],
-            pdf_url=r["pdf_url"],
-            metadata_source="google_scholar",
-        )
-        for r in results
-    ]
+

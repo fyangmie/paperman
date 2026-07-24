@@ -16,6 +16,7 @@ from paperman.fetchers.pubmed import PubMedFetcher
 from paperman.downloaders.pipeline import DownloadPipeline
 from paperman.exporters import save_yaml
 from paperman.cache import PaperCache
+from paperman.utils.network import http
 
 app = typer.Typer(name="paperman", help="Enhanced academic paper downloader", no_args_is_help=True)
 DEFAULT_OUTPUT = Path.home() / "Documents" / "papers"
@@ -116,7 +117,7 @@ def download(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(10, "--limit", "-l", help="Number of results"),
-    source: str = typer.Option("crossref", "--source", "-s", help="crossref | pubmed | all"),
+    source: str = typer.Option("crossref", "--source", "-s", help="crossref | pubmed | eupmc | all"),
     download_flag: bool = typer.Option(False, "--download", "-d", help="Download after selecting"),
     csv: bool = typer.Option(False, "--csv", help="Output as CSV (easy to copy)"),
 ) -> None:
@@ -127,14 +128,8 @@ def search(
 
     with Spinner(f"Searching {source}..."):
         if source in ("crossref", "all"):
-            import requests
-            resp = requests.get(
-                "https://api.crossref.org/works",
-                params={"query.title": query, "rows": limit},
-                timeout=30,
-                headers={"User-Agent": "Paperman/0.1"},
-            )
-            if resp.status_code == 200:
+            resp = http.get("https://api.crossref.org/works", params={"query.title": query, "rows": limit})
+            if resp is not None:
                 for item in resp.json().get("message", {}).get("items", []):
                     authors = [f"{a.get('given','')} {a.get('family','')}".strip() for a in item.get("author", [])]
                     results.append(Paper(
@@ -152,6 +147,10 @@ def search(
         if source in ("pubmed", "all"):
             from paperman.fetchers.pubmed import PubMedFetcher
             results.extend(PubMedFetcher.search_by_query(query, limit))
+
+        if source in ("eupmc", "all"):
+            from paperman.fetchers.pubmed import PubMedFetcher
+            results.extend(PubMedFetcher.search_europepmc(query, limit))
 
     if not results:
         console.print("[yellow]No results found[/yellow]")
@@ -339,9 +338,12 @@ def config(
 
     default_output = cfg.get("settings", "output", fallback=str(DEFAULT_OUTPUT))
     proxy = cfg.get("settings", "proxy", fallback="")
+    ncbi_key = cfg.get("settings", "ncbi_api_key", fallback="")
+    masked_key = ncbi_key[:4] + "****" if ncbi_key else "(none)"
     console.print(f"[dim]Config file:[/dim] {cfg_path}")
-    console.print(f"  output = {default_output}")
-    console.print(f"  proxy  = {proxy or '(none)'}")
+    console.print(f"  output       = {default_output}")
+    console.print(f"  proxy        = {proxy or '(none)'}")
+    console.print(f"  ncbi_api_key = {masked_key}")
     if proxy:
         from paperman.utils.network import http
         http.reload_proxy()

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-import requests
 from loguru import logger
 
 from paperman.fetchers import BaseFetcher
 from paperman.models.paper import Paper, SourceType
+from paperman.utils.network import http
 
 
 class CrossrefFetcher(BaseFetcher):
@@ -22,26 +22,17 @@ class CrossrefFetcher(BaseFetcher):
         return None
 
     def _fetch_by_doi(self, doi: str) -> Optional[Paper]:
-        resp = requests.get(
-            f"{self.base}/{doi}",
-            timeout=30,
-            headers={"User-Agent": "Paperman/0.1"},
-        )
-        if resp.status_code != 200:
-            logger.warning(f"CrossRef: {doi} -> {resp.status_code}")
+        resp = http.get(f"{self.base}/{doi}")
+        if resp is None:
+            logger.warning(f"CrossRef: {doi} -> failed")
             return None
 
         data = resp.json().get("message", {})
         return self._parse(data, doi=doi)
 
     def _search_by_title(self, title: str) -> Optional[Paper]:
-        resp = requests.get(
-            self.base,
-            params={"query.title": title, "rows": 1},
-            timeout=30,
-            headers={"User-Agent": "Paperman/0.1"},
-        )
-        if resp.status_code != 200:
+        resp = http.get(self.base, params={"query.title": title, "rows": 1})
+        if resp is None:
             return None
         items = resp.json().get("message", {}).get("items", [])
         if not items:

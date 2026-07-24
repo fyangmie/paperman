@@ -4,10 +4,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-import requests
 from loguru import logger
 
 from paperman.models.paper import Paper
+from paperman.utils.network import http
 
 
 class BaseDownloader(ABC):
@@ -23,15 +23,15 @@ class BaseDownloader(ABC):
         if not url:
             return None
 
-        try:
-            resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-            body = resp.content
-            if len(body) > 10000 and body[:4] == b"%PDF":
-                path = dest / f"{paper.safe_filename()}.pdf"
-                path.write_bytes(body)
-                return path
-            else:
-                logger.debug(f"  {self.name}: response not PDF ({len(body)} bytes, header={body[:20]})")
-        except requests.RequestException as e:
-            logger.debug(f"  {self.name}: request failed: {e}")
+        resp = http.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        if resp is None:
+            return None
+
+        body = resp.content
+        if len(body) > 10000 and body[:4] == b"%PDF":
+            path = dest / f"{paper.safe_filename()}.pdf"
+            path.write_bytes(body)
+            return path
+
+        logger.debug(f"  {self.name}: response not PDF ({len(body)} bytes, header={body[:20]})")
         return None

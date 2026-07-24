@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup
 from loguru import logger
 
 from paperman.models.paper import Paper
 from paperman.downloaders.base import BaseDownloader
+from paperman.utils.network import http
 
 
 class SciHubDownloader(BaseDownloader):
@@ -28,24 +28,19 @@ class SciHubDownloader(BaseDownloader):
             "https://sci-hub.st",
             "https://sci-hub.wf",
         ]
-        try:
-            resp = requests.get("https://sci-hub.now.sh/", timeout=10)
+        resp = http.get("https://sci-hub.now.sh/", timeout=10)
+        if resp is not None:
             soup = BeautifulSoup(resp.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = a["href"]
                 if "sci-hub." in href:
                     logger.info(f"Sci-Hub mirror found: {href}")
                     return href.rstrip("/")
-        except Exception:
-            pass
 
         for c in candidates:
-            try:
-                resp = requests.get(c, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                if resp.status_code == 200:
-                    return c
-            except Exception:
-                continue
+            resp = http.get(c, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if resp is not None:
+                return c
         return candidates[0]
 
     def get_pdf_url(self, paper: Paper) -> Optional[str]:
@@ -54,19 +49,18 @@ class SciHubDownloader(BaseDownloader):
             return None
 
         url = f"{self.base_url}/{doi}"
-        try:
-            resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
-            soup = BeautifulSoup(resp.text, "html.parser")
-            iframe = soup.find("iframe")
-            if iframe and iframe.get("src"):
-                src = iframe["src"]
-                return src if src.startswith("http") else f"https:{src}"
+        resp = http.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+        if resp is None:
+            return None
 
-            # fallback: look for embed or direct PDF link
-            emb = soup.find("embed", {"type": "application/pdf"})
-            if emb and emb.get("src"):
-                return emb["src"]
+        soup = BeautifulSoup(resp.text, "html.parser")
+        iframe = soup.find("iframe")
+        if iframe and iframe.get("src"):
+            src = str(iframe["src"])
+            return src if src.startswith("http") else f"https:{src}"
 
-        except Exception as e:
-            logger.warning(f"Sci-Hub failed for {doi}: {e}")
+        emb = soup.find("embed", {"type": "application/pdf"})
+        if emb and emb.get("src"):
+            return str(emb["src"])
+
         return None

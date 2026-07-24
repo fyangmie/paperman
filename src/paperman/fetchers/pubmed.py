@@ -3,16 +3,30 @@ from __future__ import annotations
 from typing import Optional
 
 import re
-
-import requests
+from configparser import ConfigParser
+from pathlib import Path
 
 from paperman.fetchers import BaseFetcher
 from paperman.models.paper import Paper, SourceType
+from paperman.utils.network import http
+
+
+CONFIG_PATH = Path.home() / ".config" / "paperman" / "config.ini"
 
 
 class PubMedFetcher(BaseFetcher):
     name = "pubmed"
     priority = 2
+
+    @staticmethod
+    def _ncbi_params(**kw) -> dict:
+        cfg = ConfigParser()
+        if CONFIG_PATH.exists():
+            cfg.read(CONFIG_PATH)
+            key = cfg.get("settings", "ncbi_api_key", fallback="")
+            if key:
+                kw["api_key"] = key
+        return kw
 
     def fetch(self, identifier: str, source_type: SourceType) -> Optional[Paper]:
         if source_type == SourceType.pmid:
@@ -24,8 +38,8 @@ class PubMedFetcher(BaseFetcher):
     @staticmethod
     def _by_pmid(pmid: str) -> Optional[Paper]:
         url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-        resp = requests.get(url, params={"db": "pubmed", "id": pmid, "retmode": "json"}, timeout=30)
-        if resp.status_code != 200:
+        resp = http.get(url, params=PubMedFetcher._ncbi_params(db="pubmed", id=pmid, retmode="json"))
+        if resp is None:
             return None
         data = resp.json().get("result", {})
         item = data.get(pmid)
@@ -68,23 +82,21 @@ class PubMedFetcher(BaseFetcher):
 
     @classmethod
     def search_by_query(cls, query: str, limit: int = 10) -> list[Paper]:
-        search = requests.get(
+        search = http.get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-            params={"db": "pubmed", "term": query, "retmax": limit, "retmode": "json"},
-            timeout=30,
+            params=cls._ncbi_params(db="pubmed", term=query, retmax=limit, retmode="json"),
         )
-        if search.status_code != 200:
+        if search is None:
             return []
         ids = search.json().get("esearchresult", {}).get("idlist", [])
         if not ids:
             return []
 
-        summary = requests.get(
+        summary = http.get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
-            params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
-            timeout=30,
+            params=cls._ncbi_params(db="pubmed", id=",".join(ids), retmode="json"),
         )
-        if summary.status_code != 200:
+        if summary is None:
             return []
 
         results = []
@@ -108,10 +120,39 @@ class PubMedFetcher(BaseFetcher):
         return results
 
     @staticmethod
+    def search_europepmc(query: str, limit: int = 10) -> list[Paper]:
+        """Search Europe PMC (includes preprints, broader coverage)."""
+        resp = http.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={"query": query, "pageSize": limit, "format": "json"},
+        )
+        if resp is None:
+            return []
+        results: list[Paper] = []
+        for item in resp.json().get("resultList", {}).get("result", []):
+            doi = item.get("doi") or ""
+            pmcid = item.get("pmcid") or ""
+            pmid = item.get("pmid") or ""
+            authors = [a.strip() for a in item.get("authorString", "").split(",") if a.strip()]
+            results.append(Paper(
+                source_type=SourceType.doi if doi else SourceType.pmid,
+                source_id=doi or pmid,
+                doi=doi or None,
+                pmid=pmid or None,
+                pmcid=pmcid or None,
+                title=item.get("title", ""),
+                authors=authors,
+                journal=item.get("journalTitle", ""),
+                year=int(item.get("firstPublicationDate", "0000")[:4]) if item.get("firstPublicationDate") else None,
+                metadata_source="europepmc",
+            ))
+        return results
+
+    @staticmethod
     def resolve_pmcid(doi: str) -> Optional[str]:
         url = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
-        resp = requests.get(url, params={"ids": doi, "format": "json"}, timeout=30)
-        if resp.status_code != 200:
+        resp = http.get(url, params=PubMedFetcher._ncbi_params(ids=doi, format="json"))
+        if resp is None:
             return None
         records = resp.json().get("records", [])
         if records and "pmcid" in records[0]:

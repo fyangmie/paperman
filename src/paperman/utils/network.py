@@ -55,5 +55,13 @@ class HTTPClient:
         except requests.RequestException:
             return None
 
+    def post(self, url: str, timeout: int = 30, **kwargs) -> Optional[requests.Response]:
+        try:
+            resp = self.sess.post(url, timeout=timeout, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException:
+            return None
+
 
 http = HTTPClient()
