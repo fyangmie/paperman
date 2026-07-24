@@ -14,49 +14,41 @@ paperman/
 │   ├── __init__.py
 │   ├── __main__.py
 │   │
-│   ├── cli.py                 # typer CLI 入口
-│   ├── config.py              # 全局配置
+│   ├── cli.py                 # typer CLI 入口（全部命令）
 │   │
 │   ├── models/
-│   │   ├── __init__.py
 │   │   └── paper.py           # Paper 数据模型（Pydantic）
 │   │
-│   ├── sources/               # 输入源识别
-│   │   ├── __init__.py
-│   │   ├── classifier.py      # 识别 DOI / PMID / arXiv / URL / Title
-│   │   └── source.py          # Source 数据类
+│   ├── sources/
+│   │   └── classifier.py      # 识别 DOI / PMID / arXiv / URL / Title
 │   │
-│   ├── fetchers/              # 元数据获取
-│   │   ├── __init__.py
-│   │   ├── base.py            # BaseFetcher 抽象
-│   │   ├── crossref.py        # CrossRef API
-│   │   ├── pubmed.py          # PubMed / NCBI E-utilities
-│   │   └── arxiv.py           # arXiv API
+│   ├── fetchers/              # 元数据获取（串行回退）
+│   │   ├── __init__.py        # BaseFetcher 抽象
+│   │   ├── crossref.py        # CrossRef REST API
+│   │   ├── pubmed.py          # NCBI E-utilities + EuropePMC
+│   │   ├── arxiv.py           # arXiv API
+│   │   ├── openalex.py        # OpenAlex（含摘要、概念、OA 链接）
+│   │   └── scholar.py         # Google Scholar（requests 模式）
 │   │
-│   ├── downloaders/           # PDF 下载
+│   ├── downloaders/           # PDF 下载（四级回退链）
 │   │   ├── __init__.py
-│   │   ├── base.py            # BaseDownloader 抽象
-│   │   ├── pipeline.py        # 多级回退链调度
+│   │   ├── base.py            # BaseDownloader 抽象 + PDF 下载
+│   │   ├── pipeline.py        # 优先级调度
 │   │   ├── arxiv.py           # arXiv 直链
 │   │   ├── pmc.py             # PubMed Central
-│   │   ├── publisher.py       # 出版社 URL 推断
-│   │   └── scihub.py          # Sci-Hub
+│   │   ├── publisher.py       # 31 家出版社 URL 推断
+│   │   └── scihub.py          # Sci-Hub 镜像发现
 │   │
-│   ├── exporters/             # 输出
-│   │   ├── __init__.py
-│   │   ├── pdf.py             # PDF 保存
-│   │   ├── bibtex.py          # BibTeX 导出
-│   │   └── yaml.py            # YAML 元数据导出
+│   ├── exporters/             # YAML / BibTeX 导出
+│   │   └── __init__.py
 │   │
-│   ├── cache/                 # 缓存层
-│   │   ├── __init__.py
-│   │   └── sqlite.py          # SQLite 缓存
+│   ├── cache/                 # SQLite 缓存
+│   │   └── __init__.py
 │   │
 │   └── utils/
-│       ├── __init__.py
 │       ├── log.py             # loguru 配置
 │       ├── console.py         # rich 终端
-│       └── network.py         # HTTP session 管理
+│       └── network.py         # 统一 HTTP client（proxy 感知）
 ```
 
 ---
@@ -64,33 +56,45 @@ paperman/
 ## 3. 数据流
 
 ```
-用户输入 (DOI/PMID/URL/Title)
+用户输入 (DOI/PMID/arXiv URL/Title)
         │
         ▼
   ┌─────────────┐
-  │ classifier  │──判类型─→ Source(doi=xxx, type='doi')
+  │ classifier  │──判类型 → Source(doi=xxx, type='doi')
   └─────────────┘
         │
         ▼
-  ┌──────────────┐
-  │ fetchers     │──尝试顺序：CrossRef → PubMed → arXiv
-  │ (metadata)   │
-  └──────────────┘
-        │
-        ▼
-  ┌──────────────┐
-  │ Paper 模型   │──含 title, authors, journal, year, doi, pmid, abstract...
-  └──────────────┘
-        │
-        ▼
   ┌──────────────────┐
-  │ downloader       │──回退链：arXiv/PMC 免费 → 出版社推断 → Sci-Hub
-  │ (PDF pipeline)   │
+  │ fetchers          │
+  │ (元数据串行回退)  │
+  │                   │
+  │ 优先顺序：        │
+  │  1. CrossRef      │
+  │  2. arXiv         │
+  │  3. OpenAlex      │
+  │  4. PubMed (PMID) │
   └──────────────────┘
         │
         ▼
   ┌──────────────────┐
-  │ exporters        │── PDF + metadata.yaml + .bib
+  │ Paper 模型       │──含 title, authors, journal, year, doi,
+  │ (Pydantic)       │   pmid, abstract, keywords, pdf_url...
+  └──────────────────┘
+        │
+        ▼
+  ┌──────────────────┐
+  │ downloader       │──四级回退链（优先级顺序）：
+  │ (PDF pipeline)   │  arXiv → PMC → 出版社推断 → Sci-Hub
+  └──────────────────┘
+        │
+        ▼
+  ┌──────────────────┐
+  │ exporters        │── {title}.pdf + {title}.yaml + {title}.bib
+  └──────────────────┘
+        │
+        ▼
+  ┌──────────────────┐
+  │ SQLite cache     │──自动缓存 + 下次秒回
   └──────────────────┘
 ```
 
@@ -124,66 +128,64 @@ class Source:
 ```python
 class BaseFetcher(ABC):
     name: str
-    priority: int            # 尝试顺序
-    def fetch(Source) -> Optional[Paper]
+    def fetch(identifier: str, source_type: SourceType) -> Optional[Paper]
 ```
 
-实现类：
-- **CrossRefFetcher** (priority=1): REST API，覆盖面最广，但需邮箱标识
-- **PubMedFetcher** (priority=2): NCBI E-utilities，PMID 查询，提供摘要
+实现类（串行尝试，取第一个非空结果）：
+- **CrossRefFetcher** (priority=1): REST API，覆盖面最广
 - **ArxivFetcher** (priority=3): arXiv API，仅限 arXiv 论文
+- **OpenAlexFetcher** (priority=4): 开放学术图谱，含摘要（inverted index 解码）、概念分类、OA PDF 链接、引用数
+- **PubMedFetcher** (priority=2, PMID 时优先): NCBI E-utilities，支持 ncbi_api_key 配置提升速率
 
-三路并行或串行，取第一个非空结果。
+PubMedFetcher 还提供：
+- `search_by_query()` — PubMed 搜索
+- `search_europepmc()` — Europe PMC 搜索（含 preprint）
+- `resolve_pmcid()` — DOI → PMCID 解析
 
 ### 4.3 Downloaders 模块（PDF 下载）
 
-四级回退链，每个 Downloader 实现：
+四级回退链，按 priority 排序：
 
 ```python
 class BaseDownloader(ABC):
     name: str
+    priority: int            # 执行顺序
     def get_pdf_url(Paper) -> Optional[str]
     def download(Paper, dest) -> Optional[Path]
 ```
 
-**Level 0 — Open Access 直链：**
-- arXiv → 已有免费 PDF
-- PMC → 有 PMCID 的直接构造 pubmedcentral PDF 链接
+**Level 0 — arXiv 直链 (priority=0)：**
+- arXiv ID → arXiv PDF URL
 
-**Level 1 — 出版社 URL 推断（参考 metapub.FindIt 的 registry 思路）：**
-维护一个出版社 URL pattern 表：
+**Level 1 — PMC (priority=1)：**
+- 有 PMCID 的直接构造 PMC PDF 链接
 
-```python
-PUBLISHER_PATTERNS = {
-    "10.1016":  "https://www.sciencedirect.com/science/article/pii/{doi_suffix}/pdfft",
-    "10.1038":  "https://www.nature.com/articles/{doi_suffix}.pdf",
-    "10.1126":  "https://www.science.org/doi/pdf/{doi}",
-    "10.1161":  "https://www.ahajournals.org/doi/pdf/{doi}",
-    "10.1186":  "https://link.springer.com/content/pdf/{doi}.pdf",
-    "10.1093":  "https://academic.oup.com/{journal}/article-pdf/{doi}/{article}.pdf",
-}
-```
+**Level 2 — 出版社 URL 推断 (priority=2)：**
+维护 31 家出版社 URL pattern 表，支持 `{doi}`, `{suffix}`, `{journal}` 变量：
+- PLOS 从 DOI 中提取 journal slug 并映射到全名（`pbio` → `plosbiology`）
+- bioRxiv 使用无版本 URL，服务端自动处理最新版本
+- 对非 PLOS URL 发送 HEAD 验证（404 则跳过）
 
-发送 HEAD 请求验证链接有效性。
-
-**Level 2 — Sci-Hub（参考原项目 + SciDownl）：**
-- 自动检测可用 Sci-Hub 镜像
-- DOI → Sci-Hub → 提取 iframe PDF 链接 → 下载
-
-**Level 3 — Google Scholar 搜索（参考 PyPaperBot）：**
-- 通过标题搜索 Google Scholar
-- 提取 PDF 链接
+**Level 3 — Sci-Hub (priority=3)：**
+- 自动检测可用镜像（now.sh + 硬编码候选列表）
+- DOI → 提取 iframe/embed 中的 PDF 链接
 
 ### 4.4 缓存层
 
 ```python
 class PaperCache:
     def get(doi) -> Optional[Paper]
+    def get_by_pmid(pmid) -> Optional[Paper]
     def set(paper: Paper)
-    def has(doi) -> bool
+    def update_pdf_path(doi, path)
+    def list_all() -> list[Paper]
+    def search(query) -> list[Paper]
+    def remove(doi)
+    def close()
 ```
 
-使用 SQLite 缓存已查询的元数据和 PDF 路径，避免重复请求。
+使用 SQLite（`~/.cache/paperman/papers.db`），支持上下文管理器。
+搜索策略：SQL 层粗筛（doi/pmid/data LIKE）→ Python 层精筛（title/authors/journal）。
 
 ### 4.5 输出
 
@@ -201,88 +203,116 @@ paperman [OPTIONS] COMMAND [ARGS]...
 
 Options:
   -v, --verbose            Verbose logging
-  -o, --output PATH        输出目录（默认 ~/Documents/papers）
 
 Commands:
-  download  通过 DOI/PMID/URL 下载论文
-  search    搜索论文（CrossRef / arXiv）
-  show      查看已下载论文信息
-  list      列出本地库中的论文
-  config    查看/修改配置
+  download     通过 DOI/PMID/arXiv ID 下载论文（含元数据 + PDF）
+  search       搜索论文（crossref | pubmed | eupmc | openalex | all）
+  list         列出缓存论文
+  show         查看缓存论文详情（含 Semantic Scholar 引用数）
+  batch        从文件批量下载
+  import-bib   从 BibTeX 文件导入论文
+  open-paper   用系统阅读器打开已下载 PDF
+  config       查看/修改配置（proxy, ncbi_api_key, output）
+  stats        缓存 + 磁盘统计
+  scholar      Google Scholar 搜索（requests 模式）
+  prune        清理过期或全部缓存
+  remove       删除单条缓存
 ```
 
-### download 子命令
+### download
 
 ```
 paperman download [OPTIONS] IDENTIFIER
 
-Arguments:
-  IDENTIFIER        DOI / PMID / arXiv ID / URL
-
-Options:
-  --bib             同时导出 BibTeX
-  --no-pdf          只获取元数据，不下载 PDF
-  --all             显示完整元数据（包括摘要）
+Options:  --bib, --no-pdf, -f/--force, -o/--output
 ```
 
-### search 子命令
+### search
 
 ```
 paperman search [OPTIONS] QUERY
 
-Arguments:
-  QUERY             搜索关键词
-
 Options:
-  --source          搜索源：crossref | arxiv | all（默认 all）
-  --limit NUMBER    结果数量（默认 10）
-  --download        同时下载搜索结果
+  -s, --source   crossref | pubmed | eupmc | openalex | all (默认 crossref)
+  -l, --limit    结果数量（默认 10）
+  -d, --download 交互式选择下载
+  --csv          CSV 输出
+```
+
+### batch
+
+```
+paperman batch [OPTIONS] FILE
+
+Options:  -o/--output, --bib, --no-pdf, -r/--resume, -l/--log <path>
+```
+
+### import-bib / open-paper
+
+```
+paperman import-bib refs.bib           # 从 BibTeX 文件导入
+paperman open-paper 10.xxx             # 打开已下载 PDF
 ```
 
 ---
 
-## 6. 实施方案（三阶段）
+## 6. 实施完成状态
 
-### Phase 1：基础框架 ✅
+### 基础框架 ✅
 
-- [x] CLI 入口（typer）
-- [x] Paper 数据模型（Pydantic）
-- [x] CrossRef 元数据获取
-- [x] arXiv 元数据 + PDF 下载
-- [x] Sci-Hub downloader — iframe 提取 + 镜像自动发现
-- [x] Source classifier — DOI/PMID/arXiv/URL/Title 自动识别
-- [x] BaseDownloader + Pipeline — 四级回退链框架
+- CLI 入口（typer，11 个命令）
+- Paper 数据模型（Pydantic + YAML/BibTeX 导出）
+- Source classifier — DOI/PMID/arXiv/URL/Title 自动识别
+- SQLite 缓存（get/set/search/remove/close + 上下文管理器）
+- 统一 HTTP client（proxy 感知，所有请求共享）
 
-### Phase 2：增强下载能力 ✅
+### 元数据获取（4 源回退）
 
-- [x] PubMed fetcher — NCBI E-utilities 获取 PMID→元数据
-- [x] PMC downloader — 有 PMCID 的从 PMC 免费下载
-- [x] Publisher URL 推断 — 12 家常用出版社 pattern 覆盖
-- [x] Sci-Hub mirror 自动探测 — 多镜像轮换
-- [x] **SQLite 缓存** — 避免重复查询
-- [x] `paperman search` — arXiv + CrossRef 双源搜索 + 交互式选择下载
-- [x] `paperman list / show` — 本地库管理
-- [x] 批量下载 — 从文件读 DOI 列表
+- ✅ CrossRef REST API — DOI / 标题查询
+- ✅ PubMed / NCBI E-utilities — PMID 查询、搜索、EuropePMC 搜索
+- ✅ arXiv API — arXiv ID / 标题查询
+- ✅ OpenAlex — DOI / 标题查询（含摘要、概念分类、OA 链接）
+- ✅ Google Scholar — requests 搜索（无 Selenium 依赖）
 
-### Phase 3：完善体验 ✅
+### PDF 下载（四级回退链）
 
-- [x] **Google Scholar 搜索** — 参考 PyPaperBot 实现
-- [x] **配置文件完善** — 默认输出目录、代理设置
-- [x] **bibtex 导出完善** — 完整 BibTeX 格式（abstract、keyword、pmid等）
-- [x] **Zotero 集成** — 导出 Better BibTeX 格式，Zotero 自动监控导入
-- [x] **pip 发布** — pyproject.toml 完善，`pip install paperman` 就绪
+- ✅ arXiv 免费直链
+- ✅ PMC 免费 PDF
+- ✅ 31 家出版社 URL 推断（含 PLOS 多期刊映射、bioRxiv 无版本）
+- ✅ Sci-Hub 镜像发现 + iframe 提取
+
+### CLI 功能
+
+- ✅ `download` — DOI/PMID/arXiv/URL/标题 → 元数据 + PDF + YAML + BibTeX
+- ✅ `search` — crossref / pubmed / eupmc / openalex / all 多源搜索
+- ✅ `batch` — 文件批量下载 + `--resume` 续传 + `--log` TSV 日志
+- ✅ `import-bib` — BibTeX 文件导入
+- ✅ `open-paper` — 系统阅读器打开 PDF
+- ✅ `list / show / stats` — 缓存管理（show 含 S2 引用数）
+- ✅ `config` — proxy / ncbi_api_key / output 配置
+- ✅ `prune / remove` — 缓存清理
+
+### 工程
+
+- ✅ ruff lint 零警告
+- ✅ 101 项 pytest 单元测试
+- ✅ pixi 依赖管理（conda-forge + pypi）
+- ✅ GitHub Actions CI
+- ✅ Nuitka 单文件构建
 
 ---
 
 ## 7. 与参考项目的对比优势
 
-| 能力 | scihub.py | PyPaperBot | metapub | SciDownl | **paperman** |
-|------|-----------|------------|---------|----------|-------------|
-| 多源元数据 | ✗ | ✗ | ✓ | ✗ | **✓** |
-| OA 免费直链 | ✗ | ✗ | ✓ | ✗ | **✓** |
-| 出版社 URL 推断 | ✗ | ✗ | ✓ | ✗ | **✓** |
-| Sci-Hub 下载 | ✓ | ✓ | ✗ | ✓ | **✓** |
-| Google Scholar | ✓ | ✓ | ✗ | ✗ | **✓** |
-| 缓存 | ✗ | ✗ | ✓ | ✗ | **✓** |
-| 多种输出格式 | ✗ | 仅PDF | ✓ | ✗ | **✓** |
-| rich 终端 | ✗ | ✗ | ✗ | ✗ | **✓** |
+| 能力 | scihub.py | papis | getpapers | arxiv.py | **paperman** |
+|------|-----------|-------|-----------|----------|-------------|
+| 多源元数据 | ✗ | ✓ | 4 源 | 1 源 | **5 源** |
+| 摘要 + 概念 | ✗ | ✗ | ✗ | ✓ | **✓ (OA)** |
+| OA 免费直链 | ✗ | ✗ | ✗ | ✓ | **✓** |
+| 出版社 URL 推断 | ✗ | ✗ | ✗ | ✗ | **31 家** |
+| Sci-Hub | ✓ | 插件 | ✗ | ✗ | **✓** |
+| 缓存 | ✗ | 文件 | ✗ | ✗ | **SQLite** |
+| BibTeX 导入/导出 | ✗ | ✓ | ✗ | ✗ | **✓** |
+| EuropePMC + OpenAlex | ✗ | ✗ | EUPMC | ✗ | **✓** |
+| 引用数据 | ✗ | ✗ | ✗ | ✗ | **S2 (show)** |
+| 批量 + Resume + Log | 文件 | ✗ | ✓ | ✗ | **✓** |

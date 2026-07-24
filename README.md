@@ -15,11 +15,11 @@ Enhanced academic paper downloader — 多源元数据获取 + 多通道 PDF 下
 | HTTP | [requests](https://requests.readthedocs.io/) |
 | HTML 解析 | [beautifulsoup4](https://www.crummy.com/software/BeautifulSoup/) |
 | 缓存 | SQLite（Python 内置） |
-| 数据格式 | YAML / BibTeX |
+| 数据格式 | YAML (via [pyyaml](https://pyyaml.org/)) / BibTeX (via [bibtexparser](https://github.com/sciunto-org/python-bibtexparser)) |
 | 包管理 | [pixi](https://pixi.sh/) |
 | 代码质量 | [ruff](https://docs.astral.sh/ruff/) |
-| 测试 | [pytest](https://docs.pytest.org/) |
-| 构建（可选） | [Nuitka](https://nuitka.net/) |
+| 测试 | [pytest](https://docs.pytest.org/)（101 项） |
+| 数据源 | [CrossRef](https://www.crossref.org/), [NCBI](https://www.ncbi.nlm.nih.gov/), [arXiv](https://arxiv.org/), [OpenAlex](https://openalex.org/), [Europe PMC](https://europepmc.org/), [Semantic Scholar](https://www.semanticscholar.org/), [Google Scholar](https://scholar.google.com/) |
 
 ---
 
@@ -110,40 +110,41 @@ arXiv 免费直链  →  PMC 免费  →  出版社 URL 推断  →  Sci-Hub
 
 每个下载器按优先级顺序尝试，前一个失败自动切换到下一个。支持重试 + 代理切换。
 
-**支持 30 家出版社 URL 推断：**
+**支持 31 家出版社 URL 推断：**
 
-| DOI 前缀 | 出版社/期刊 |
-|----------|------------|
-| `10.1016` | Elsevier / ScienceDirect |
-| `10.1038` | Nature Publishing Group |
-| `10.1126` | Science |
-| `10.1161` | AHA Journals (Circulation, Circ Res) |
-| `10.1186` | Springer / BioMed Central |
-| `10.1007` | Springer |
-| `10.1093` | Oxford University Press |
-| `10.3390` | MDPI |
-| `10.1111` | Wiley |
-| `10.1021` | American Chemical Society |
-| `10.1080` | Taylor & Francis |
-| `10.1056` | New England Journal of Medicine |
-| `10.1136` | BMJ |
-| `10.1152` | American Physiological Society |
-| `10.1158` | AACR (Cancer Research) |
-| `10.4049` | Journal of Immunology |
-| `10.1681` | JASN |
-| `10.1200` | Journal of Clinical Oncology |
-| `10.1210` | Endocrine Society |
-| `10.1172` | JCI |
-| `10.1371` | PLOS |
-| `10.15252` | EMBO Press |
-| `10.1242` | Company of Biologists |
-| `10.1101` | bioRxiv / medRxiv |
-| `10.1073` | PNAS |
-| `10.1084` | Rockefeller University Press |
-| `10.2337` | Diabetes |
-| `10.4161` | Landes Bioscience |
-| `10.2147` | Dove Press |
-| `10.21037` | AME Publishing |
+| DOI 前缀 | 出版社/期刊 | 说明 |
+|----------|------------|------|
+| `10.1016` | Elsevier / ScienceDirect | |
+| `10.1038` | Nature Publishing Group | |
+| `10.1126` | Science | |
+| `10.1161` | AHA Journals | |
+| `10.1186` | Springer / BioMed Central | |
+| `10.1007` | Springer | |
+| `10.1093` | Oxford University Press | |
+| `10.3390` | MDPI | |
+| `10.1111` | Wiley | |
+| `10.1021` | American Chemical Society | |
+| `10.1080` | Taylor & Francis | |
+| `10.1056` | New England Journal of Medicine | |
+| `10.1136` | BMJ | |
+| `10.1152` | American Physiological Society | |
+| `10.1158` | AACR | |
+| `10.1210` | Endocrine Society | |
+| `10.1172` | JCI | |
+| `10.1242` | Company of Biologists | |
+| `10.1371` | **PLOS** | 自动识别子刊（`pbio`→plosbiology, `pgen`→plosgenetics 等） |
+| `10.15252` | EMBO Press | |
+| `10.1101` | **bioRxiv / medRxiv** | 无版本号，服务端返回最新版 |
+| `10.1073` | PNAS | |
+| `10.1084` | Rockefeller University Press | |
+| `10.1681` | JASN | |
+| `10.2147` | Dove Press | |
+| `10.21037` | AME Publishing | |
+| `10.2337` | Diabetes | |
+| `10.3892` | Spandidos Publications | |
+| `10.4049` | Journal of Immunology | |
+| `10.4161` | Landes Bioscience | |
+| `10.1200` | Journal of Clinical Oncology | |
 
 ---
 
@@ -159,20 +160,26 @@ paperman search [OPTIONS] QUERY
 |------|------|
 | `QUERY` | 搜索关键词 |
 | `-l, --limit` | 结果数量（默认 10） |
-| `-s, --source` | 搜索源：`crossref` / `pubmed` / `all` |
+| `-s, --source` | 搜索源：`crossref` / `pubmed` / `eupmc` / `openalex` / `all` |
 | `-d, --download` | 搜索后选择序号下载 |
 | `--csv` | CSV 格式输出（方便复制粘贴） |
 
 **示例：**
 
 ```bash
-# CrossRef 搜索
+# CrossRef 搜索（默认）
 paperman search "mechanosensing piezo1" -l 5
 
 # PubMed 搜索
 paperman search "piezo1" --source pubmed -l 5 --csv
 
-# 双源搜索 + 下载
+# EuropePMC 搜索（含 preprint）
+paperman search "cancer genomics" --source eupmc -l 5
+
+# OpenAlex 搜索（含摘要、概念、OA 链接）
+paperman search "machine learning" --source openalex -l 5
+
+# 全部源搜索 + 下载
 paperman search "liver regeneration" --source all -l 10 -d
 ```
 
@@ -191,7 +198,7 @@ paperman scholar [OPTIONS] QUERY
 | `-d, --download` | 下载所有结果 |
 | `--csv` | CSV 格式输出 |
 
-当 `requests` 被拦截时，自动 fallback 到 Selenium + Chrome 重试。（需安装 Chrome/Chromium）
+基于 requests + BeautifulSoup 搜索，不依赖浏览器。
 
 ```bash
 paperman scholar "piezo1 liver" -l 10 --csv
@@ -212,6 +219,7 @@ paperman batch [OPTIONS] FILE
 | `--bib` | 导出 BibTeX |
 | `--no-pdf` | 只获取元数据 |
 | `-r, --resume` | 跳过已下载的论文 |
+| `-l, --log PATH` | 输出 TSV 日志 |
 
 ```bash
 # 准备文件
@@ -223,6 +231,9 @@ paperman batch doilist.txt
 
 # 续传：跳过已下载的
 paperman batch doilist.txt --resume
+
+# 输出日志
+paperman batch doilist.txt -l ./report.tsv
 ```
 
 ---
@@ -244,6 +255,42 @@ paperman list -q piezo1
 
 ---
 
+### `import-bib` — 从 BibTeX 导入
+
+```
+paperman import-bib [OPTIONS] FILE
+```
+
+| 参数 | 说明 |
+|------|------|
+| `FILE` | `.bib` 文件路径 |
+| `-o, --output` | 输出目录 |
+| `--no-pdf` | 只导入元数据 |
+
+从现有的 `.bib` 文件批量导入论文到缓存。用 DOI/PMID/title 自动补全元数据，`file` 字段有 PDF 路径的自动关联。
+
+```bash
+paperman import-bib references.bib
+paperman import-bib references.bib --no-pdf
+```
+
+---
+
+### `open-paper` — 打开 PDF
+
+```
+paperman open-paper IDENTIFIER
+```
+
+从缓存中查找论文，用系统默认 PDF 阅读器打开。
+
+```bash
+paperman open-paper 10.1038/s41586-026-10644-y
+paperman open-paper 40296124
+```
+
+---
+
 ### `show` — 查看缓存详情
 
 ```
@@ -256,6 +303,7 @@ paperman show 40296124
 ```
 
 显示完整元数据：标题、作者、期刊、年份、DOI、PMID、PMCID、摘要。
+自动从 Semantic Scholar 获取引用数据（cited / influential citation count）。
 
 ---
 
@@ -296,6 +344,9 @@ paperman config --set proxy socks5://127.0.0.1:1080
 
 # 设置默认输出目录
 paperman config --set output ~/papers
+
+# 设置 NCBI API Key（提升速率至 10 req/s）
+paperman config --set ncbi_api_key YOUR_KEY_HERE
 ```
 
 配置文件：`~/.config/paperman/config.ini`
@@ -304,6 +355,7 @@ paperman config --set output ~/papers
 [settings]
 output = /var/home/smile/Documents/papers
 proxy = socks5://127.0.0.1:1080
+ncbi_api_key = a637a36ddfbcbc...
 ```
 
 ---
@@ -463,11 +515,8 @@ pixi run all          # lint + test 一站式
 ### 测试
 
 ```bash
-# 单元测试（22 项）
+# 单元测试（101 项，全部离线）
 pixi run test
-
-# 完整功能测试（26 项，含网络请求）
-pixi run python tests/run_all_tests.py
 ```
 
 ### 项目结构
@@ -477,38 +526,42 @@ paperman/
 ├── pyproject.toml               # 项目配置 + 依赖管理
 ├── .github/workflows/ci.yml     # GitHub Actions CI
 ├── tests/
-│   ├── test_classifier.py       # 输入识别测试
-│   ├── test_models.py           # 数据模型测试
-│   ├── test_publisher.py        # 出版社 pattern 测试
-│   ├── test_integration.py      # 管道集成测试
-│   └── run_all_tests.py         # 全功能测试脚本
+│   ├── test_cache.py            # SQLite 缓存测试（17 项）
+│   ├── test_classifier.py       # 输入识别测试（7 项）
+│   ├── test_exporters.py        # 导出测试（10 项）
+│   ├── test_fetchers.py         # 元数据获取 mock 测试（31 项）
+│   ├── test_integration.py      # 管道集成测试（13 项）
+│   ├── test_models.py           # 数据模型测试（6 项）
+│   ├── test_network.py          # HTTP 客户端测试（12 项）
+│   └── test_publisher.py        # 出版社 pattern 测试（5 项）
 └── src/paperman/
-    ├── cli.py                   # typer CLI 入口
+    ├── cli.py                   # typer CLI 入口（11 个命令）
     ├── __main__.py              # python -m paperman
     ├── models/paper.py          # Paper 数据模型
     ├── sources/classifier.py    # DOI/PMID/arXiv/URL 识别
     ├── fetchers/
     │   ├── crossref.py          # CrossRef 元数据
-    │   ├── pubmed.py            # PubMed 元数据
+    │   ├── pubmed.py            # PubMed + EuropePMC + NCBI Key
     │   ├── arxiv.py             # arXiv 元数据
+    │   ├── openalex.py          # OpenAlex（摘要、概念、OA 链接）
     │   └── scholar.py           # Google Scholar 搜索
     ├── downloaders/
     │   ├── base.py              # 下载器基类
     │   ├── pipeline.py          # 四级回退管道
     │   ├── arxiv.py             # arXiv 免费直链
     │   ├── pmc.py               # PubMed Central
-    │   ├── publisher.py         # 出版社 URL 推断
-    │   └── scihub.py            # Sci-Hub
+    │   ├── publisher.py         # 31 家出版社 URL 推断
+    │   └── scihub.py            # Sci-Hub 镜像发现
     ├── exporters/               # YAML / BibTeX 导出
     ├── cache/                   # SQLite 缓存
-    └── utils/                   # loguru / rich / HTTP
+    └── utils/                   # loguru / rich / HTTP client
 ```
 
 ### 代码质量
 
 ```bash
-ruff check src/          # 零警告
-pytest tests/            # 22 项测试通过
+ruff check src/ tests/   # 零警告
+pytest tests/            # 101 项测试通过
 ```
 
 ---
