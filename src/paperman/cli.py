@@ -244,6 +244,7 @@ def batch(
     bib: bool = typer.Option(False, "--bib", help="Export BibTeX"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Skip already downloaded papers"),
     no_pdf: bool = typer.Option(False, "--no-pdf", help="Metadata only, skip PDF"),
+    log: Optional[Path] = typer.Option(None, "--log", help="Path to TSV log file"),
 ) -> None:
     """Batch download papers from a file."""
     if not file.exists():
@@ -253,13 +254,13 @@ def batch(
     identifiers = [line.strip() for line in file.read_text().splitlines() if line.strip()]
     console.print(f"[dim]{len(identifiers)} identifiers loaded[/dim]")
 
+    cache = PaperCache()
     if resume:
-        cache = PaperCache()
         skipped = 0
         filtered = []
         for id_ in identifiers:
             src = classify(id_)
-            paper = cache.get(id_) if src.type == SourceType.doi else cache.get_by_pmid(id_) if src.pmid else None
+            paper = cache.get(src.doi) if src.type == SourceType.doi and src.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
             if paper and paper.pdf_path and paper.pdf_path.exists():
                 skipped += 1
                 continue
@@ -270,26 +271,33 @@ def batch(
             console.print("[green]All papers already downloaded[/green]")
             return
 
-    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
+    from tqdm import tqdm
 
     success = 0
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Downloading...", total=len(identifiers))
-        for id_ in identifiers:
-            progress.update(task, description=f"[bold]{id_[:50]}[/bold]")
-            try:
-                download(id_, output=output, bib=bib, no_pdf=no_pdf)
-                success += 1
-            except SystemExit:
-                logger.warning(f"Failed: {id_}")
-            progress.advance(task)
+    results: list[dict] = []
+
+    for id_ in tqdm(identifiers, desc="Downloading", unit="paper"):
+        try:
+            download(id_, output=output, bib=bib, no_pdf=no_pdf)
+            success += 1
+            src = classify(id_)
+            paper = cache.get(src.doi) if src.type == SourceType.doi and src.doi else cache.get_by_pmid(src.pmid) if src.pmid else None
+            pdf_ok = "yes" if (paper and paper.pdf_path and paper.pdf_path.exists()) else "no"
+            results.append({"identifier": id_, "status": "success", "pdf": pdf_ok, "yaml": "yes"})
+        except SystemExit:
+            results.append({"identifier": id_, "status": "failure", "pdf": "no", "yaml": "no"})
 
     console.print(f"\n[green]Batch done: {success}/{len(identifiers)} succeeded[/green]")
+
+    if log:
+        import csv
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "w", newline="") as f:
+            w = csv.writer(f, delimiter="\t")
+            w.writerow(["identifier", "status", "pdf", "yaml"])
+            for r in results:
+                w.writerow([r["identifier"], r["status"], r["pdf"], r["yaml"]])
+        console.print(f"[green]✓[/] Log: {log}")
 
 
 @app.command()
