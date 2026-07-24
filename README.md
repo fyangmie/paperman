@@ -40,7 +40,7 @@ pixi run paperman --help
 
 ```bash
 # 下载最新版
-curl -L https://github.com/laq12345/paperman/releases/download/v0.0.0/paperman -o paperman
+curl -L https://github.com/laq12345/paperman/releases/download/v0.1.0/paperman -o paperman
 chmod +x paperman
 ./paperman --help
 ```
