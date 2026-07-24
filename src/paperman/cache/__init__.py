@@ -7,12 +7,11 @@ from typing import Optional
 from paperman.models.paper import Paper
 
 CACHE_DIR = Path.home() / ".cache" / "paperman"
-CACHE_DB = CACHE_DIR / "papers.db"
 
 
 def _ensure_db():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(CACHE_DB))
+    conn = sqlite3.connect(str(CACHE_DIR / "papers.db"))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS papers (
             doi TEXT PRIMARY KEY,
@@ -67,6 +66,13 @@ class PaperCache:
 
     def update_pdf_path(self, doi: str, path: Path) -> None:
         self.conn.execute("UPDATE papers SET pdf_path = ? WHERE doi = ?", (str(path), doi))
+        # Also update the JSON blob so get() returns it
+        cur = self.conn.execute("SELECT data FROM papers WHERE doi = ?", (doi,))
+        row = cur.fetchone()
+        if row:
+            paper = Paper.model_validate_json(row[0])
+            paper.pdf_path = path
+            self.conn.execute("UPDATE papers SET data = ? WHERE doi = ?", (paper.model_dump_json(), doi))
         self.conn.commit()
 
     def list_all(self) -> list[Paper]:
@@ -76,8 +82,8 @@ class PaperCache:
     def search(self, query: str) -> list[Paper]:
         q = f"%{query}%"
         cur = self.conn.execute(
-            "SELECT data FROM papers WHERE doi LIKE ? OR pmid LIKE ? ORDER BY created_at DESC",
-            (q, q),
+            "SELECT data FROM papers WHERE doi LIKE ? OR pmid LIKE ? OR data LIKE ? ORDER BY created_at DESC",
+            (q, q, q),
         )
         papers = [Paper.model_validate_json(row[0]) for row in cur.fetchall()]
         query_lower = query.lower()
