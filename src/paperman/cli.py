@@ -378,53 +378,78 @@ def import_bib(
     entries = db.entries if hasattr(db, "entries") else db.get("entries", [])
     console.print(f"[dim]{len(entries)} entries loaded from {file.name}[/dim]")
 
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+    from paperman.downloaders.pipeline import DownloadPipeline
+
+    logger.disable("paperman")
+
     cache = PaperCache()
     success = 0
-    for entry in entries:
-        doi = entry.get("doi", "").strip()
-        pmid = entry.get("pmid", "").strip()
-        title = entry.get("title", "").strip().rstrip(".").strip()
-        identifier = doi or pmid or title
-        if not identifier:
-            logger.warning(f"Skipping entry with no DOI/PMID/title: {entry.get('ID', '?')}")
-            continue
 
-        src = classify(identifier)
-        paper = _fetch_metadata(src.cleaned, src.type)
-        if paper is None:
-            logger.warning(f"Could not fetch metadata: {identifier}")
-            continue
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TimeRemainingColumn(),
+        console=console,
+        redirect_stdout=True,
+    )
+    with progress:
+        task = progress.add_task("", total=len(entries))
+        output.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            doi = entry.get("doi", "").strip()
+            pmid = entry.get("pmid", "").strip()
+            title = entry.get("title", "").strip().rstrip(".").strip()
+            identifier = doi or pmid or title
+            if not identifier:
+                progress.advance(task)
+                continue
 
-        cache.set(paper)
-        _resolve_pmcid(paper)
-        cache.set(paper)
+            progress.update(task, description=identifier[:60])
+            src = classify(identifier)
+            paper = _fetch_metadata(src.cleaned, src.type)
+            if paper is None:
+                console.print(f"[red]✗[/] {identifier}  [dim]metadata not found[/dim]")
+                progress.advance(task)
+                continue
 
-        # Attach local PDF from BibTeX file field if present
-        bib_pdf = entry.get("file", "")
-        if bib_pdf:
-            pdf_candidates = [p.strip() for p in bib_pdf.replace(":", ";").split(";") if p.strip().endswith(".pdf")]
-            for cand in pdf_candidates:
-                p = Path(cand)
-                if p.exists():
-                    from paperman.downloaders.pipeline import DownloadPipeline
-                    paper.pdf_path = p
+            cache.set(paper)
+            _resolve_pmcid(paper)
+            cache.set(paper)
+
+            # Attach local PDF from BibTeX file field if present
+            bib_pdf = entry.get("file", "")
+            pdf_attached = False
+            if bib_pdf:
+                pdf_candidates = [p.strip() for p in bib_pdf.replace(":", ";").split(";") if p.strip().endswith(".pdf")]
+                for cand in pdf_candidates:
+                    p = Path(cand)
+                    if p.exists():
+                        paper.pdf_path = p
+                        if paper.doi:
+                            cache.update_pdf_path(paper.doi, p)
+                        pdf_attached = True
+                        break
+
+            pdf_ok = "yes" if pdf_attached else "no"
+            if not no_pdf and not pdf_attached:
+                pipeline = DownloadPipeline()
+                pdf_path = pipeline.download(paper, output)
+                if pdf_path:
+                    pdf_ok = "yes"
                     if paper.doi:
-                        cache.update_pdf_path(paper.doi, p)
-                    console.print(f"  [green]✓[/] attached PDF: {p.name}")
-                    break
+                        cache.update_pdf_path(paper.doi, pdf_path)
 
-        if not no_pdf:
-            from paperman.downloaders.pipeline import DownloadPipeline
-            pipeline = DownloadPipeline()
-            pdf_path = pipeline.download(paper, output)
-            if pdf_path and paper.doi:
-                cache.update_pdf_path(paper.doi, pdf_path)
+            yaml_path = output / f"{paper.safe_filename()}.yaml"
+            yaml_path.write_text(paper.to_yaml())
+            success += 1
+            icon = "[green]✓[/]" if pdf_ok == "yes" else "[yellow]✓[/]"
+            console.print(f"{icon} {identifier}  pdf:{pdf_ok}  yaml:yes")
+            progress.advance(task)
 
-        yaml_path = output / f"{paper.safe_filename()}.yaml"
-        yaml_path.write_text(paper.to_yaml())
-        success += 1
-
-    console.print(f"\n[green]Imported: {success}/{len(entries)} papers[/green]")
+    logger.enable("paperman")
+    console.print(f"\nImported: [green]{success}[/green]/[dim]{len(entries)}[/dim] papers")
 
 
 @app.command()
