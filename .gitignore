@@ -36,3 +36,25 @@ AGENTS.md
 cli.dist/
 cli.build/
 cli.onefile-build/
+
+# Local environments, data, authentication and experiment outputs
+.venv*/
+.local/
+data/
+outputs/
+polymer_corpus/
+*.pdf
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.ovpn
+*.pem
+*.key
+.env.*
+!.env.example
+*credentials*.json
+cookies*.json
+ChromeProfile/
+
+.ruff_cache/

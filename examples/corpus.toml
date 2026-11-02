@@ -1,0 +1,49 @@
+# Use --output for existing data; see docs/MIGRATION.md.
+[corpus]
+start_date = "2000-01-01"
+# end_date defaults to the day of initial discovery, then is persisted for resumption.
+keywords = ["polymer", "polymeric", "copolymer", "polyethylene", "polypropylene", "polystyrene", "polyurethane", "polyamide", "polyester"]
+per_publisher = 20
+candidates_per_publisher = 200
+seed = 42
+page_size = 100
+max_pages = 3
+# Optional metadata enrichment; OpenAlex may require an API key for your access tier.
+openalex = false
+# contact = "researcher@university.edu"
+
+[network]
+interval = 10.0
+retries = 3
+timeout = 45.0
+max_bytes = 52428800
+
+# Use environmental HTTPS_PROXY or PAPERMAN_CORPUS_PROXY for the institutional route.
+# Secrets are read from environment variables, never put them in this file.
+# html_enabled means the institution/publisher channel has been verified for this project.
+# No browser sign-in, CAPTCHA automation, or inferred XML URLs are used.
+[publishers.elsevier]
+api_key_env = "ELSEVIER_API_KEY"
+insttoken_env = "ELSEVIER_INSTTOKEN"
+html_enabled = false
+
+[publishers.springer_nature]
+oa_api_key_env = "SPRINGER_NATURE_API_KEY"
+html_enabled = false
+# For institutional TDM, set the actual DOI URL template supplied with your access:
+# xml_url = "https://YOUR-VERIFIED-HOST/articles/{doi}"
+# token_env = "SPRINGER_TDM_TOKEN"
+# token_header = "Authorization"
+# token_prefix = "Bearer "
+
+[publishers.acs]
+html_enabled = false
+# xml_url / html_url and token_* may be configured for verified delivery channels.
+# Publisher-delivered files can also be registered using corpus import-delivery.
+
+[publishers.rsc]
+html_enabled = false
+
+[publishers.wiley]
+html_enabled = false
+# Standard Wiley TDM supplies PDF; configure a separate verified HTML/XML channel.

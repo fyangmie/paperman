@@ -108,3 +108,38 @@ def test_get_passes_kwargs(tmp_path, monkeypatch):
         client.get("https://example.com", headers={"X-Custom": "value"})
         call_kwargs = mock.call_args[1]
         assert call_kwargs["headers"]["X-Custom"] == "value"
+
+
+def test_direct_mode_ignores_environment_proxy_and_keeps_ca(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text("[settings]\nproxy_mode = direct\nproxy = http://configured:8080\n")
+    monkeypatch.setattr("paperman.utils.network.CONFIG_PATH", cfg)
+    monkeypatch.setenv("HTTPS_PROXY", "http://environment:8080")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/test-ca.pem")
+    client = HTTPClient()
+    settings = client.sess.merge_environment_settings("https://example.com", {}, False, None, None)
+    assert client.sess.trust_env is False
+    assert client.sess.proxies == {}
+    assert settings["proxies"] == {}
+    assert settings["verify"] == "/tmp/test-ca.pem"
+
+
+def test_reload_can_switch_between_direct_and_auto(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text("[settings]\nproxy_mode = direct\n")
+    monkeypatch.setattr("paperman.utils.network.CONFIG_PATH", cfg)
+    client = HTTPClient()
+    assert client.sess.trust_env is False
+    cfg.write_text("[settings]\nproxy_mode = auto\nproxy = http://configured:8080\n")
+    client.reload_proxy()
+    assert client.sess.trust_env is False
+    assert client.sess.proxies["https"] == "http://configured:8080"
+
+def test_explicit_proxy_wins_over_environment(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text("[settings]\nproxy_mode=auto\nproxy=http://configured:8080\n")
+    monkeypatch.setattr("paperman.utils.network.CONFIG_PATH", cfg)
+    monkeypatch.setenv("HTTPS_PROXY", "http://environment:9999")
+    client = HTTPClient()
+    settings = client.sess.merge_environment_settings("https://example.org", {}, False, None, None)
+    assert settings["proxies"]["https"] == "http://configured:8080"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
+from urllib.parse import quote
 
 from loguru import logger
 
@@ -22,7 +24,9 @@ class CrossrefFetcher(BaseFetcher):
         return None
 
     def _fetch_by_doi(self, doi: str) -> Optional[Paper]:
-        resp = http.get(f"{self.base}/{doi}")
+        os.environ["PAPERMAN_CURRENT_DOI"] = doi
+        os.environ["PAPERMAN_CURRENT_SOURCE"] = "crossref"
+        resp = http.get(f"{self.base}/{quote(doi, safe='')}")
         if resp is None:
             logger.warning(f"CrossRef: {doi} -> failed")
             return None
@@ -68,4 +72,6 @@ class CrossrefFetcher(BaseFetcher):
             pages=data.get("page", ""),
             publisher=data.get("publisher", ""),
             metadata_source="crossref",
+            fulltext_links=data.get("link", []),
+            landing_url=data.get("resource", {}).get("primary", {}).get("URL", ""),
         )

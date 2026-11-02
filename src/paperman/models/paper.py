@@ -37,6 +37,8 @@ class Paper(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     publisher: str = ""
 
+    fulltext_links: list[dict] = Field(default_factory=list)
+    landing_url: str = ""
     pdf_url: Optional[str] = None
     pdf_path: Optional[Path] = None
     metadata_source: str = ""

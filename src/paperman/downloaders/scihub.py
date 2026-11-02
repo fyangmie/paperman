@@ -1,66 +1,69 @@
 from __future__ import annotations
-
-from typing import Optional
-
+import os
+from urllib.parse import quote, urljoin, urlsplit
 from bs4 import BeautifulSoup
-from loguru import logger
-
-from paperman.models.paper import Paper
 from paperman.downloaders.base import BaseDownloader
-from paperman.utils.network import http
-
+from paperman.utils.network import HTTPClient
 
 class SciHubDownloader(BaseDownloader):
     name = "scihub"
-    priority = 3
+    priority = 2
 
     def __init__(self):
-        import urllib3
-        import warnings
-        warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-        self.base_url = self._find_mirror()
+        # No homepage request: availability is checked for the actual DOI.
+        self.mirrors = ["https://sci-hub.ru", "https://sci-hub.st",
+                        "https://sci-hub.se", "https://sci-hub.wf"]
+        self.client = HTTPClient()
+        self.client.sess.trust_env = False
+        self.client.sess.proxies = {}
+        self.client.sess.verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
+        self.proxy = os.environ.get("PAPERMAN_SCIHUB_PROXY", "")
+        self.base_url = self.mirrors[0]
 
     @staticmethod
-    def _find_mirror() -> str:
-        candidates = [
-            "https://sci-hub.se",
-            "https://sci-hub.ru",
-            "https://sci-hub.st",
-            "https://sci-hub.wf",
-        ]
-        resp = http.get("https://sci-hub.now.sh/", timeout=10)
-        if resp is not None:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "sci-hub." in href:
-                    logger.info(f"Sci-Hub mirror found: {href}")
-                    return href.rstrip("/")
+    def extract_urls(html, page_url):
+        soup = BeautifulSoup(html, "html.parser")
+        result = []
+        for tag in soup.find_all(["iframe", "embed", "object", "a"]):
+            value = tag.get("data") if tag.name == "object" else tag.get("href") if tag.name == "a" else tag.get("src")
+            if not value:
+                continue
+            if tag.name == "a" and ".pdf" not in value.lower():
+                continue
+            url = urljoin(page_url, value)
+            if urlsplit(url).scheme in ("https", "http") and url not in result:
+                result.append(url)
+        return result
 
-        for c in candidates:
-            resp = http.get(c, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if resp is not None:
-                return c
-        return candidates[0]
+    def iter_pdf_urls(self, paper):
+        if not paper.doi:
+            return
+        # Keep each route active until its PDF candidates have been tried.
+        for proxy in [""] + ([self.proxy] if self.proxy else []):
+            self.client.sess.proxies = {"http": proxy, "https": proxy} if proxy else {}
+            for mirror in self.mirrors:
+                self.base_url = mirror
+                url = mirror + "/" + quote(paper.doi, safe="/")
+                response = self.client.get(url, timeout=12, headers={"User-Agent":"Mozilla/5.0"})
+                if response is None:
+                    continue
+                if b"%PDF" in response.content[:1024]:
+                    yield response.url
+                else:
+                    for candidate in self.extract_urls(response.text, response.url):
+                        yield candidate
 
-    def get_pdf_url(self, paper: Paper) -> Optional[str]:
-        doi = paper.doi
-        if not doi:
+    def get_pdf_url(self, paper):
+        return next(self.iter_pdf_urls(paper), None)
+
+    def download(self, paper, dest):
+        if not paper.pdf_url:
             return None
-
-        url = f"{self.base_url}/{doi}"
-        resp = http.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
-        if resp is None:
+        response = self.client.get(paper.pdf_url, timeout=30, headers={"User-Agent":"Mozilla/5.0"})
+        if response is None:
             return None
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        iframe = soup.find("iframe")
-        if iframe and iframe.get("src"):
-            src = str(iframe["src"])
-            return src if src.startswith("http") else f"https:{src}"
-
-        emb = soup.find("embed", {"type": "application/pdf"})
-        if emb and emb.get("src"):
-            return str(emb["src"])
-
-        return None
+        if b"%PDF" not in response.content[:1024] or len(response.content) <= 10000:
+            return None
+        path = dest / (paper.safe_filename() + ".pdf")
+        path.write_bytes(response.content)
+        return path

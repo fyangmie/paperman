@@ -18,8 +18,10 @@ from paperman.downloaders.pipeline import DownloadPipeline
 from paperman.exporters import save_yaml
 from paperman.cache import PaperCache
 from paperman.utils.network import http
+from paperman.corpus.cli import app as corpus_app
 
 app = typer.Typer(name="paperman", help="Enhanced academic paper downloader", no_args_is_help=True)
+app.add_typer(corpus_app, name="corpus")
 DEFAULT_OUTPUT = Path.home() / "Documents" / "papers"
 
 
@@ -30,6 +32,8 @@ def callback(verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbos
 
 def _fetch_metadata(src_id: str, src_type: SourceType) -> Optional[Paper]:
     """Try all fetchers in priority order."""
+    from paperman.progress import stage
+    stage("metadata", outcome="started")
     fetchers: list = [CrossrefFetcher(), ArxivFetcher(), OpenAlexFetcher()]
     if src_type == SourceType.pmid:
         fetchers.insert(0, PubMedFetcher())
@@ -37,12 +41,15 @@ def _fetch_metadata(src_id: str, src_type: SourceType) -> Optional[Paper]:
         paper = fetcher.fetch(src_id, src_type)
         if paper:
             paper.source_id = src_id
+            stage("metadata", outcome="found", source=fetcher.name, publisher=paper.publisher, journal=paper.journal, title=paper.title)
             logger.info(f"Metadata from {fetcher.name}")
             return paper
     return None
 
 
 def _resolve_pmcid(paper: Paper) -> None:
+    from paperman.progress import stage
+    stage("pmc_lookup", outcome="started")
     if paper.doi and not paper.pmcid:
         pmcid = PubMedFetcher.resolve_pmcid(paper.doi)
         if pmcid:
@@ -495,7 +502,8 @@ def config(
     """View or modify configuration."""
     from configparser import ConfigParser
 
-    cfg_path = Path.home() / ".config" / "paperman" / "config.ini"
+    from paperman.utils.network import CONFIG_PATH
+    cfg_path = CONFIG_PATH
     cfg_dir = cfg_path.parent
     cfg = ConfigParser()
 
@@ -518,6 +526,7 @@ def config(
     console.print(f"[dim]Config file:[/dim] {cfg_path}")
     console.print(f"  output       = {default_output}")
     console.print(f"  proxy        = {proxy or '(none)'}")
+    console.print(f"  proxy_mode   = {cfg.get('settings', 'proxy_mode', fallback='auto')}")
     console.print(f"  ncbi_api_key = {masked_key}")
     if proxy:
         from paperman.utils.network import http
@@ -538,7 +547,8 @@ def stats() -> None:
 
     # Disk stats (scan output directory from config or default)
     from configparser import ConfigParser
-    cfg_path = Path.home() / ".config" / "paperman" / "config.ini"
+    from paperman.utils.network import CONFIG_PATH
+    cfg_path = CONFIG_PATH
     cfg = ConfigParser()
     if cfg_path.exists():
         cfg.read(cfg_path)

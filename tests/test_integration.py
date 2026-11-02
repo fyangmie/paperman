@@ -1,8 +1,19 @@
 """Integration tests for the download pipeline (no network required)."""
 
+from unittest.mock import Mock
+import pytest
+
 from paperman.downloaders.pipeline import DownloadPipeline
 from paperman.downloaders.publisher import PUBLISHER_PATTERNS
 from paperman.models.paper import Paper, SourceType
+
+
+@pytest.fixture(autouse=True)
+def offline_publisher(monkeypatch):
+    """URL construction tests must not depend on publisher availability."""
+    response = Mock(status_code=200)
+    monkeypatch.setattr("paperman.downloaders.publisher.http.head", lambda *a, **kw: response)
+    monkeypatch.setattr("paperman.downloaders.publisher.http.get", lambda *a, **kw: None)
 
 
 def make_paper(doi="10.1186/s13054-026-05843-y", title="Test"):
@@ -49,9 +60,10 @@ def test_doi_prefix_match_longest_first():
     from paperman.downloaders.publisher import PublisherDownloader
     dl = PublisherDownloader()
     paper = make_paper(doi="10.1016/j.cell.2024.04.023")
+    paper.landing_url = "https://www.sciencedirect.com/science/article/pii/S0092867424005113"
     url = dl.get_pdf_url(paper)
     assert url is not None
-    assert "sciencedirect" in url
+    assert "S0092867424005113" in url
 
 
 def test_publisher_pattern_count():
@@ -79,7 +91,7 @@ def test_pipeline_downloaders_sorted():
     priorities = [d.priority for d in pipeline.downloaders]
     assert priorities == sorted(priorities)
     assert pipeline.downloaders[0].name == "arxiv"
-    assert pipeline.downloaders[-1].name == "scihub"
+    assert [d.name for d in pipeline.downloaders] == ["arxiv", "pmc", "scihub", "publisher"]
 
 
 def test_openalex_abstract_decoding():
