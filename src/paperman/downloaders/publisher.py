@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 import re
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urldefrag
 from bs4 import BeautifulSoup
 
 from loguru import logger
@@ -62,85 +62,119 @@ PUBLISHER_PATTERNS: dict[str, str] = {
 class PublisherDownloader(BaseDownloader):
     name = "publisher"
     priority = 3
+    max_candidates = 12
+    # These article URLs require journal/article IDs that cannot be derived from
+    # the DOI suffix alone. Discover their PDF links rather than guess an ID.
+    landing_first = {"10.1093", "10.1210", "10.1242", "10.1084", "10.2337",
+                     "10.1136", "10.1681", "10.2147", "10.21037", "10.1115"}
+    pdf_path = re.compile(r"/(?:articlepdf|doi/(?:e?pdf|pdfdirect)|content/pdf|pdfft|article-pdf)/|/pdfft(?:$|[?])|\.pdf(?:$|[?])", re.I)
+    excluded_link = re.compile(r"supplement|supporting|appendix|citation|reference|related|recommended", re.I)
+
+    @staticmethod
+    def _url(value: str, base: str = "") -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        try:
+            url = urldefrag(urljoin(base, value.strip()))[0]
+            parts = urlsplit(url)
+            if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+                return None
+            if parts.hostname in {"api.wiley.com", "api.elsevier.com"}:
+                return None  # Separate authenticated API clients, not web PDF links.
+            if parts.hostname == "pubs.rsc.org" and parts.scheme == "http":
+                url = "https:" + url[len("http:"):]
+            return url
+        except ValueError:
+            return None
 
     def get_pdf_url(self, paper: Paper) -> Optional[str]:
-        doi = paper.doi
-        if not doi:
-            logger.debug("  publisher: no DOI")
-            return None
+        """Compatibility API. The pipeline consumes iter_pdf_urls to try all."""
+        return next(self.iter_pdf_urls(paper), None)
 
-        # Deposited links are preferred to guessed publisher templates.
-        for link in paper.fulltext_links:
-            url = link.get("URL", "")
-            if urlsplit(url).hostname in ("api.wiley.com", "api.elsevier.com"):
+    def iter_pdf_urls(self, paper: Paper):
+        """Lazily try deposited links, templates, then article landing pages."""
+        if not paper.doi:
+            return
+        seen = set()
+        for url in self._candidates(paper):
+            normalized = self._url(url)
+            if not normalized or normalized in seen:
                 continue
-            if url.startswith("http://pubs.rsc.org/"):
-                url = "https://" + url[len("http://"): ]
-            if urlsplit(url).scheme in ("http", "https") and (
-                link.get("content-type") == "application/pdf"
-                or re.search(r"/(?:articlepdf|doi/pdf|content/pdf)/", url, re.I)
-            ):
-                return url
-        if doi.startswith("10.1016/"):
-            candidates = [paper.landing_url] + [
-                x.get("URL", "") for x in paper.fulltext_links
-            ]
-            for candidate in candidates:
-                match = re.search(r"(?:/pii/|PII:)([A-Za-z0-9]+)", candidate)
+            seen.add(normalized)
+            yield normalized
+            if len(seen) >= self.max_candidates:
+                return
+
+    def _candidates(self, paper: Paper):
+        for link in paper.fulltext_links:
+            url = self._url(link.get("URL", ""))
+            if url and (link.get("content-type", "").split(";")[0].strip().lower() == "application/pdf"
+                        or self.pdf_path.search(url)):
+                yield url
+
+        prefix, _, suffix = paper.doi.partition("/")
+        if prefix == "10.1016":
+            for value in [paper.landing_url] + [x.get("URL", "") for x in paper.fulltext_links]:
+                match = re.search(r"(?:/pii/|PII:)([A-Za-z0-9]+)", value)
                 if match:
-                    return ("https://www.sciencedirect.com/science/article/pii/"
-                            + match.group(1) + "/pdfft")
-            return self._landing_pdf(paper)
-        if doi.startswith("10.1039/"):
-            return self._landing_pdf(paper)
+                    yield "https://www.sciencedirect.com/science/article/pii/" + match.group(1) + "/pdfft"
+        elif prefix in PUBLISHER_PATTERNS and prefix not in self.landing_first:
+            slug = suffix.split(".")[1] if prefix == "10.1371" and "." in suffix else ""
+            yield PUBLISHER_PATTERNS[prefix].format(
+                doi=quote(paper.doi, safe="/"), suffix=quote(suffix, safe="/"),
+                journal=PLOS_JOURNALS.get(slug, slug))
+        # A HEAD rejection is not proof that GET fails; let the actual PDF
+        # request decide. This fallback applies even to previously unknown DOIs.
+        yield from self._landing_urls(paper)
 
-        prefix = None
-        for key in sorted(PUBLISHER_PATTERNS, key=len, reverse=True):
-            if doi.startswith(key):
-                prefix = key
-                break
+    def _landing_urls(self, paper: Paper):
+        visited = set()
+        for value in [paper.landing_url, "https://doi.org/" + quote(paper.doi or "", safe="/")]:
+            url = self._url(value)
+            if not url or url in visited:
+                continue
+            visited.add(url)
+            response = http.get(url, timeout=20)
+            if response is None:
+                continue
+            if b"%PDF" in response.content[:1024]:
+                yield response.url
+                continue
+            final = self._url(response.url)
+            if not final:
+                continue
+            # The resolver commonly redirects to the already parsed landing.
+            if final in visited and final != url:
+                continue
+            visited.add(final)
+            yield from self._page_urls(response, paper)
 
-        if prefix is None:
-            logger.debug(f"  publisher: no pattern for {doi[:12]}...")
-            return None
-
-        suffix = doi.replace(prefix, "").lstrip("/")
-        pattern = PUBLISHER_PATTERNS[prefix]
-
-        # Extract journal slug for PLOS (10.1371/journal.pbio.XXX → pbio)
-        if prefix == "10.1371" and "." in suffix:
-            slug = suffix.split(".")[1]
-            journal = PLOS_JOURNALS.get(slug, slug)
-        else:
-            journal = ""
-
-        url = pattern.format(doi=quote(doi, safe="/"), suffix=quote(suffix, safe="/"), journal=journal)
-
-        # HEAD check for non-PLOS URLs: skip on 404 (pattern likely wrong)
-        # PLOS returns 404 on HEAD for valid PDF URLs, so skip the check
-        if prefix != "10.1371":
-            resp = http.head(url)
-            if resp is not None and resp.status_code == 404:
-                logger.debug(f"  publisher: {url[:70]} -> 404, skipping")
-                return None
-
-        return url
+    def _page_urls(self, response, paper: Paper):
+        soup = BeautifulSoup(response.text, "html.parser")
+        canonical_dois = [m.get("content", "") for m in soup.find_all("meta")
+                          if str(m.get("name", "")).lower() in {"citation_doi", "dc.identifier.doi"}]
+        normalize = lambda value: re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", value.strip(), flags=re.I).lower()
+        if canonical_dois and normalize(paper.doi or "") not in {normalize(d) for d in canonical_dois}:
+            logger.debug("publisher: landing page DOI differs from requested article")
+            return
+        for meta in soup.find_all("meta"):
+            if str(meta.get("name", "")).lower() == "citation_pdf_url":
+                yield urljoin(response.url, meta.get("content", ""))
+        for link in soup.find_all("link", href=True):
+            if str(link.get("type", "")).lower() == "application/pdf":
+                yield urljoin(response.url, link["href"])
+        for anchor in soup.find_all("a", href=True):
+            # Do not select a supplementary PDF or a reference-list PDF merely
+            # because it shares the .pdf extension.
+            context = " ".join([anchor.get_text(" ", strip=True), anchor["href"],
+                                str(anchor.get("class", "")), str(anchor.get("id", ""))])
+            containers = " ".join(str(node.get("class", "")) + " " + str(node.get("id", ""))
+                                  for node in anchor.parents if getattr(node, "attrs", None))
+            if self.excluded_link.search(context + " " + containers):
+                continue
+            if self.pdf_path.search(anchor["href"]):
+                yield urljoin(response.url, anchor["href"])
 
     def _landing_pdf(self, paper: Paper) -> Optional[str]:
-        url = paper.landing_url or "https://doi.org/" + quote(paper.doi or "", safe="/")
-        resp = http.get(url)
-        if resp is None:
-            return None
-        soup = BeautifulSoup(resp.text, "html.parser")
-        meta = soup.find("meta", attrs={"name": "citation_pdf_url"})
-        if meta and meta.get("content"):
-            candidate = urljoin(resp.url, meta["content"])
-            if urlsplit(candidate).scheme in ("http", "https"):
-                return candidate
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if re.search(r"articlepdf|/doi/pdf/|/pdfft|/article-pdf/|\.pdf(?:$|[?#])", href, re.I):
-                candidate = urljoin(resp.url, href)
-                if urlsplit(candidate).scheme in ("http", "https"):
-                    return candidate
-        return None
+        # Compatibility for older helper scripts.
+        return next((u for value in self._landing_urls(paper) if (u := self._url(value))), None)

@@ -34,6 +34,8 @@ python -m paperman.corpus report -o /absolute/path/corpus
 
 PDF 获取元数据后，按已有 arXiv 编号 → PMC → Sci-Hub → 出版社尝试；失败等待 3 秒再试一轮；仍失败才用标题检索 arXiv，并保守匹配 DOI 或标题与作者。默认来源顺序保留本分支既有设置；paperman-bulk 的 --sources 和 --retries 可覆盖本次任务设置。
 
+出版社步骤会逐个尝试元数据和模板提供的 PDF 地址，并在失败时解析文章落地页；未知 DOI 前缀也会进入这一兜底流程。没有可解析链接、权限不足或人机验证仍可能导致失败。
+
 HTML/XML 不由 PDF 下载成功自动产生；正文识别、机构访问、API 或仓储资源情况分别记录。具体入口见 [CORPUS.md](CORPUS.md)。
 
 ## 记录与复现
